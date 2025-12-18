@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package orchestrator.v1;
+
+option go_package = "github.com/aditip149209/Orion/api/proto/v1;orchestratorv1";
+
+// Simple test service
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  string status = 1;
+  string message = 2;
+}
+

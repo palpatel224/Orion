@@ -1,0 +1,15 @@
+version: v1
+plugins:
+  # 1. The Struct Generator
+  # Creates the Go structs (Heartbeat, NodeStatus, etc.)
+  - plugin: go
+    out: .
+    opt: paths=source_relative
+
+  # 2. The gRPC Interface Generator
+  # Creates the Server and Client interfaces (Register(), SendHeartbeat())
+  - plugin: go-grpc
+    out: .
+    opt: paths=source_relative
+
+    
