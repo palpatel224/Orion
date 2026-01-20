@@ -5,12 +5,14 @@ import(
 	"github.com/docker/go-connections/nat"
 	"time"
 	"io"
+	"log"
 	"os"
 	"context"
 	"math"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 type State int
@@ -72,9 +74,35 @@ type Docker struct {
 	Config Config
 }
 
+func NewConfig(t *Task) Config{
+	c:=Config{
+		Name:t.Name,
+		AttachStdin:true,
+		AttachStderr:true,
+		AttachStdout:true,
+		ExposedPorts:t.ExposedPorts,
+		Image:t.Image,
+		Disk:t.Disk,
+		Memory:t.Memory,
+		RestartPolicy:t.RestartPolicy,
+	}
+	return c;
+}
+
+func NewDocker(c *Config) Docker{
+	cli,_:=client.NewClientWithOpts(client.FromEnv)
+	ctx:=context.Background()
+	cli.NegotiateAPIVersion(ctx)
+	d:=Docker{
+		Config:*c,
+		Client:cli,
+	}
+	return d;
+}
+
 func(d *Docker) Run() DockerResult {
 	ctx:=context.Background()
-	reader,err:=d.Client.ImagePull(ctx context.Context,refStr string,options types.PullOptions )
+	reader,err:=d.Client.ImagePull(ctx,d.Config.Image,image.PullOptions{})
 	if err!=nil {
 		log.Printf("Error pulling image %s : %v\n",d.Config.Image,err)
 		return DockerResult{Error:err}
@@ -82,12 +110,12 @@ func(d *Docker) Run() DockerResult {
 	io.Copy(os.Stdout,reader)
 
 	rp:=container.RestartPolicy{
-		Name:d.Config.RestartPolicy,
+		Name:container.RestartPolicyMode(d.Config.RestartPolicy),
 	}
 
 	r:=container.Resources{
-		Memory:d.Confg.Memory,
-		NanoCPUs:int64(d.Config,CPu*math.Pow(10,9)),
+		Memory:d.Config.Memory,
+		NanoCPUs:int64(d.Config.Cpu*math.Pow(10,9)),
 	}
 
 	cc:=container.Config{
@@ -109,9 +137,9 @@ func(d *Docker) Run() DockerResult {
 		return DockerResult{Error:err}
 	}
 
-	err = d.Client.ContainerStart(ctx,res.ID,types.ContainerStartOptions{})
+	err = d.Client.ContainerStart(ctx,res.ID,container.StartOptions{})
 	if err!=nil {
-		log.Printf("Error starting container %s : %v\n",resp.ID,err)
+		log.Printf("Error starting container %s : %v\n",res.ID,err)
 		return DockerResult{Error:err}
 	}
 
@@ -121,12 +149,12 @@ func(d *Docker) Run() DockerResult {
 		return DockerResult{Error:e}
 	}
 	stdcopy.StdCopy(os.Stdout,os.Stderr,out)
-	return DockerResult{containerId:res.ID,Action:"start",Result:"success"}
+	return DockerResult{ContainerId:res.ID,Action:"start",Result:"success"}
 }
 
-func(d *Docker) Stop(id String) DockerResult{
+func(d *Docker) Stop(id string) DockerResult{
 	ctx:=context.Background()
-	err:=d.Clinet.ContainerStop(ctx,id,nil)
+	err:=d.Client.ContainerStop(ctx,id,container.StopOptions{})
 	if err!=nil{
 		log.Printf("Error stopping container %d : %v\n",id,err)
 		return DockerResult{Error:err}
