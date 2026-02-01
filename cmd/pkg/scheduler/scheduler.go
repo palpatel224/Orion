@@ -1,7 +1,13 @@
 package scheduler
 
 type Scheduler struct {
-	SelectCandidateNodes()
-	Score()
-	Pick()
+}
+
+func (s *Scheduler) SelectCandidateNodes() {
+}
+
+func (s *Scheduler) Score() {
+}
+
+func (s *Scheduler) Pick() {
 }
