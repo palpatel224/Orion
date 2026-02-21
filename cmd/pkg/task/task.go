@@ -8,6 +8,8 @@ import(
 	"log"
 	"os"
 	"context"
+	"encoding/json"
+
 	"math"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/api/types/container"
@@ -27,17 +29,24 @@ const (
 
 type Task struct{
 	ID uuid.UUID
-	ContainerId uuid.UUID
+	ContainerId string
 	Name string
 	State State
 	Image string
 	Memory int64
 	Disk int64
 	ExposedPorts nat.PortSet
-	PortBindings  map[string]string
+	PortBindings  map[nat.Port][]nat.PortBinding
 	RestartPolicy string
 	StartTime     time.Time
 	FinishTime    time.Time
+	HealthCheck string
+	RestartCount int
+}
+
+func (s State) MarshalJSON() ([]byte, error) { 
+	names := []string{"Pending", "Scheduled", "Running", "Completed", "Failed"}
+	return json.Marshal(names[s]) 
 }
 
 type TaskEvent struct {
@@ -60,6 +69,11 @@ type Config struct{
 	Disk int64
 	Env []string
 	RestartPolicy string
+}
+
+type DockerInspectResponse struct{
+	Container *container.InspectResponse
+	Error error
 }
 
 type DockerResult struct {
@@ -98,6 +112,17 @@ func NewDocker(c *Config) Docker{
 		Client:cli,
 	}
 	return d;
+}
+
+func(d *Docker) Inspect(containerID string) DockerInspectResponse {
+	dc,_:=client.NewClientWithOpts(client.FromEnv)
+	ctx:=context.Background()
+	resp,err:=dc.ContainerInspect(ctx,containerID)
+	if err!=nil{
+		log.Printf("Error inspecting container : %s\n",err)
+		return DockerInspectResponse{Error:err}
+	}
+	return DockerInspectResponse{Container:&resp}
 }
 
 func(d *Docker) Run() DockerResult {
