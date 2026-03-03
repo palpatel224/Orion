@@ -1,71 +1,117 @@
 package worker
 
-import(
+import (
 	"encoding/json"
-	"net/http"
-	"github.com/go-chi/chi"
-	"log"
 	"fmt"
-	"orion/cmd/pkg/task"
+	"log"
+	"net/http"
+	"orchestrator/task"
+
+	"github.com/go-chi/chi"
 	"github.com/google/uuid"
 )
-func(a *Api) GetStatsHandler(w http.ResponseWriter,r *http.Request){
-	w.Header().Set("Content-Type","application/json")
+
+func (a *Api) ListTasksHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	err:=json.NewEncoder(w).Encode(*a.Worker.Stats)
-	if err!=nil {
-		http.Error(w,"Failed to encode",http.StatusInternalServerError)
+	tasks := a.Worker.GetTasks()
+	err := json.NewEncoder(w).Encode(tasks)
+	if err != nil {
+		http.Error(w, "Failed to encode", http.StatusInternalServerError)
 		return
 	}
 }
 
-func(a *Api) StartTaskHandler(w http.ResponseWriter,r *http.Request){
-	d:=json.NewDecoder(r.Body)
+func (a *Api) GetTaskHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	taskID := chi.URLParam(r, "taskID")
+	task, ok := a.Worker.Db[uuid.MustParse(taskID)]
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(200)
+	err := json.NewEncoder(w).Encode(task)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+}
+
+func (a *Api) UpdateTaskHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	taskID := chi.URLParam(r, "taskID")
+	var taskUpdate task.Task
+	err := json.NewDecoder(r.Body).Decode(&taskUpdate)
+	if err != nil {
+		http.Error(w, "Failed to decode task", http.StatusBadRequest)
+		return
+	}
+	taskUpdate.ID = uuid.MustParse(taskID)
+	a.Worker.Db[taskUpdate.ID] = &taskUpdate
+	w.WriteHeader(200)
+	err = json.NewEncoder(w).Encode(taskUpdate)
+	if err != nil {
+		log.Print(err)
+	}
+}
+
+func (a *Api) StartTaskHandler(w http.ResponseWriter, r *http.Request) {
+	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 
-	te:=task.TaskEvent{}
-	err:=d.Decode(&te)
-	if err!=nil {
-		msg:=fmt.Sprintf("Error unmarshalling body : %v\n",err)
-		log.Printf(msg)
+	te := task.TaskEvent{}
+	err := d.Decode(&te)
+	if err != nil {
+		msg := fmt.Sprintf("Error unmarshalling body : %v\n", err)
+		log.Print(msg)
 		w.WriteHeader(400)
-		e:=ErrResponse{
-			HTTPStatusCode:400,
-			Message:msg,
+		e := ErrResponse{
+			HTTPStatusCode: 400,
+			Message:        msg,
 		}
 		json.NewEncoder(w).Encode(e)
 		return
 	}
 	a.Worker.AddTask(&te.Task)
-	log.Printf("Added task %v\n",te.Task.ID)
+	log.Printf("Added task %v\n", te.Task.ID)
 	w.WriteHeader(201)
 	json.NewEncoder(w).Encode(te.Task)
 }
 
-func(a *Api) GetTasksHandler(w http.ResponseWriter,r *http.Request){
-	w.Header().Set("Content-Type","application/json")
+func (a *Api) GetTasksHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(a.Worker.GetTasks())
 }
 
-func(a *Api) StopTaskHandler(w http.ResponseWriter,r *http.Request){
-	taskID := chi.URLParam(r,"taskID")
-	if taskID==""{
+func (a *Api) StopTaskHandler(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskID")
+	if taskID == "" {
 		log.Printf("No taskID passed in request. \n")
 		w.WriteHeader(400)
-		return;
+		return
 	}
-	tID,_:=uuid.Parse(taskID)
-	_,ok:=a.Worker.Db[tID]
-	if !ok{
-		log.Printf("No task with ID %v found",tID)
+	tID, _ := uuid.Parse(taskID)
+	_, ok := a.Worker.Db[tID]
+	if !ok {
+		log.Printf("No task with ID %v found", tID)
 		w.WriteHeader(404)
-		return;
+		return
 	}
-	taskToStop:=*a.Worker.Db[tID]
+	taskToStop := *a.Worker.Db[tID]
 	//changing the state in the desired state of tasks (for queue) not in the current state of tasks (Db)
-	taskToStop.State=task.Completed
+	taskToStop.State = task.Completed
 	a.Worker.AddTask(&taskToStop)
-	log.Printf("Added task %v to stop container %v\n",taskToStop.ID,taskToStop.ContainerId)
+	log.Printf("Added task %v to stop container %v\n", taskToStop.ID, taskToStop.ContainerId)
 	w.WriteHeader(204)
+}
+func (a *Api) GetStatsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	err := json.NewEncoder(w).Encode(a.Worker.Stats)
+	if err != nil {
+		http.Error(w, "Failed to encode", http.StatusInternalServerError)
+		return
+	}
 }

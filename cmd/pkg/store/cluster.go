@@ -1,96 +1,97 @@
 package store
 
-import(
+import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
-	"go.etcd.io/etcd/client/v3"
-	"time"
-	"encoding/json"
-	"github.com/google/uuid"
-	"context"
-	"strings"
 	"orchestrator/task"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-type Client struct{
+type Client struct {
 	Cli *clientv3.Client
 }
 
 type TaskRecord struct {
-	Task *task.Task
+	Task     *task.Task
 	WorkerID string
 }
 
-//creating etcd client
-func NewEtcdStore(endpoints []string)(*Client,error){
-	cli,err:=clientv3.New(clientv3.Config{
-		Endpoints:endpoints,
-		DialTimeout:time.Second*5,
+// creating etcd client
+func NewEtcdStore(endpoints []string) (*Client, error) {
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: time.Second * 5,
 	})
-	if err!=nil{
-		log.Printf("Error in creating client %v\n",err)
-		return nil,err
+	if err != nil {
+		log.Printf("Error in creating client %v\n", err)
+		return nil, err
 	}
-	return &Client{Cli:cli},nil
+	return &Client{Cli: cli}, nil
 }
 
-func(c *Client) taskPrefix() string{
+func (c *Client) taskPrefix() string {
 	return fmt.Sprintf("/tasks/")
 }
-func(c *Client) TaskPrefix() string{
+func (c *Client) TaskPrefix() string {
 	return c.taskPrefix()
 }
 
 func (c *Client) taskStateKey(id uuid.UUID) string {
-	return fmt.Sprintf("/tasks/%s/state/", id)
+	return fmt.Sprintf("/tasks/%s/state", id)
 }
 
-func (c *Client) taskWorkerKey(id uuid.UUID) string{
-	return fmt.Sprintf("/tasks/%s/worker/",)
+func (c *Client) taskWorkerKey(id uuid.UUID) string {
+	return fmt.Sprintf("/tasks/%s/worker", id)
 }
 
 func (c *Client) taskKey(id uuid.UUID) string {
-	return fmt.Sprintf("/tasks/%s",id)
+	return fmt.Sprintf("/tasks/%s", id)
 }
 
 func (c *Client) workerHeartbeatKey(id string) string {
-	return fmt.Sprintf("/workers/%s/heartbeat",id)
+	return fmt.Sprintf("/workers/%s/heartbeat", id)
 }
 
 func (c *Client) LeaderKey() string {
 	return fmt.Sprintf("/managers/leader")
 }
 
-func (c *Client) managerKey(id string) string{
-	return fmt.Sprintf("/manager/%s",id)
+func (c *Client) managerKey(id string) string {
+	return fmt.Sprintf("/manager/%s", id)
 }
 
-func (c *Client) ManagerKey(id string) string{
+func (c *Client) ManagerKey(id string) string {
 	return c.managerKey(id)
 }
 
-func(c *Client) workerKey(id string) string{
-	return fmt.Sprintf("/worker/%s",id)
+func (c *Client) workerKey(id string) string {
+	return fmt.Sprintf("/worker/%s", id)
 }
 
-func(c *Client) AddTaskEvent(key string,t task.TaskEvent) uint32{
-	data,err:=json.Marshal(t)
-	if err!=nil{
-		log.Printf("Error in marshaling task event %v \n",err)
+func (c *Client) AddTaskEvent(key string, t task.TaskEvent) uint32 {
+	data, err := json.Marshal(t)
+	if err != nil {
+		log.Printf("Error in marshaling task event %v \n", err)
 		return 1
 	}
-	k:=fmt.Sprintf("/taskDb/%s",t.ID.String())
-	log.Printf("task id is %v\n",k)
-	ctx:=context.Background()
-	resp,er:=c.Cli.Put(ctx,k,string(data))
-	if er!=nil{
-		log.Printf("Error in adding key-value pair to etcd %v\n",er)
+	k := fmt.Sprintf("/taskDb/%s", t.ID.String())
+	log.Printf("task id is %v\n", k)
+	ctx := context.Background()
+	resp, er := c.Cli.Put(ctx, k, string(data))
+	if er != nil {
+		log.Printf("Error in adding key-value pair to etcd %v\n", er)
 		return 1
 	}
 	// this is the cluster id which sent the response
-	fmt.Printf("Cluster ID is %v\n",resp.Header.ClusterId)
-	// this is the member id of the member which sent the response 
-	fmt.Printf("Member ID is %v\n",resp.Header.MemberId)
+	fmt.Printf("Cluster ID is %v\n", resp.Header.ClusterId)
+	// this is the member id of the member which sent the response
+	fmt.Printf("Member ID is %v\n", resp.Header.MemberId)
 	return 0
 }
 
@@ -98,7 +99,7 @@ func(c *Client) AddTaskEvent(key string,t task.TaskEvent) uint32{
 // AddTaskState under /tasks/<taskID>/state
 // pending queue
 
-func (c *Client) CreateTask(ctx context.Context, t *task.Task,workerID string) error {
+func (c *Client) CreateTask(ctx context.Context, t *task.Task, workerID string) error {
 	if t == nil {
 		return fmt.Errorf("task cannot be nil")
 	}
@@ -130,23 +131,22 @@ func (c *Client) CreateTask(ctx context.Context, t *task.Task,workerID string) e
 	return err
 }
 
-func(c *Client) GetTask(ctx context.Context,taskID uuid.UUID) (*task.Task,string,error){
-	// key := fmt.Sprintf("/tasks/%s", taskID) 
-	resp, err := c.Cli.Get(ctx, c.taskKey(taskID)) 
+func (c *Client) GetTask(ctx context.Context, taskID uuid.UUID) (*task.Task, string, error) {
+	// key := fmt.Sprintf("/tasks/%s", taskID)
+	resp, err := c.Cli.Get(ctx, c.taskKey(taskID))
 	if err != nil {
-		return nil, "",err
-	} 
+		return nil, "", err
+	}
 	if len(resp.Kvs) == 0 {
-		return nil,"", ErrNotFound
+		return nil, "", ErrNotFound
 	}
-	var t task.Task 
-	if e := json.Unmarshal(resp.Kvs[0].Value, &t); 
-	e != nil { 
-		return nil,"",e
+	var t task.Task
+	if e := json.Unmarshal(resp.Kvs[0].Value, &t); e != nil {
+		return nil, "", e
 	}
-	stateResp,er:=c.Cli.Get(ctx,c.taskStateKey(taskID))
-	if er!=nil{
-		return nil,"",er
+	stateResp, er := c.Cli.Get(ctx, c.taskStateKey(taskID))
+	if er != nil {
+		return nil, "", er
 	}
 	if stateResp.Count > 0 {
 		var s task.State
@@ -156,8 +156,8 @@ func(c *Client) GetTask(ctx context.Context,taskID uuid.UUID) (*task.Task,string
 		t.State = s
 	}
 	workerResp, err := c.Cli.Get(ctx, c.taskWorkerKey(taskID))
-	if err!=nil{
-		return nil,"",err
+	if err != nil {
+		return nil, "", err
 	}
 
 	workerID := ""
@@ -171,7 +171,7 @@ func(c *Client) GetTask(ctx context.Context,taskID uuid.UUID) (*task.Task,string
 }
 
 func (c *Client) UpdateTaskState(ctx context.Context, t *task.Task, workerID string) error {
-    if t == nil {
+	if t == nil {
 		return fmt.Errorf("task cannot be nil")
 	}
 
@@ -215,7 +215,7 @@ func (c *Client) UpdateTaskState(ctx context.Context, t *task.Task, workerID str
 
 // ListTasks returns all tasks and their worker assignments.
 func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
-	pre:=fmt.Sprintf("/tasks/")
+	pre := fmt.Sprintf("/tasks/")
 	resp, err := c.Cli.Get(ctx, pre, clientv3.WithPrefix())
 	if err != nil {
 		return nil, err
@@ -241,7 +241,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 			meta = &taskMeta{}
 			records[id] = meta
 		}
-		
+
 		switch len(segments) {
 		case 2:
 			var t task.Task
@@ -249,7 +249,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 				return nil, err
 			}
 			meta.task = &t
-		case 3:
+		case 3, 4:
 			switch segments[2] {
 			case "state":
 				var s task.State
@@ -281,11 +281,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 	return results, nil
 }
 
-func(c *Client) ListWorkers(ctx context.Context) ([]Worker,error){
-	key:=fmt.Sprintf("/worker/")
-	resp,err:=c.Cli.Get(ctx,key,clientv3.WithPrefix())
-	if err!=nil{
-		return nil,err
+func (c *Client) ListWorkers(ctx context.Context) ([]Worker, error) {
+	key := fmt.Sprintf("/worker/")
+	resp, err := c.Cli.Get(ctx, key, clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
 	}
 	type workerMeta struct {
 		worker    *Worker
@@ -294,8 +294,8 @@ func(c *Client) ListWorkers(ctx context.Context) ([]Worker,error){
 
 	records := make(map[string]*workerMeta)
 
-	for _,kv:=range resp.Kvs{
-		segments:=strings.Split(strings.TrimPrefix(string(kv.Key),"/"),"/")
+	for _, kv := range resp.Kvs {
+		segments := strings.Split(strings.TrimPrefix(string(kv.Key), "/"), "/")
 		if len(segments) < 2 || segments[0] != "workers" {
 			continue
 		}
@@ -337,14 +337,14 @@ func(c *Client) ListWorkers(ctx context.Context) ([]Worker,error){
 	return workers, nil
 }
 
-func(c *Client) UpdateWorkerHeartbeat(ctx context.Context,workerID string,heartbeat time.Time) error{
+func (c *Client) UpdateWorkerHeartbeat(ctx context.Context, workerID string, heartbeat time.Time) error {
 	hbBytes, err := json.Marshal(heartbeat)
 	if err != nil {
 		return err
 	}
-	workerKey:=c.workerKey(workerID)
-	resp,e:=c.Cli.Get(ctx,workerKey)
-	if e!=nil{
+	workerKey := c.workerKey(workerID)
+	resp, e := c.Cli.Get(ctx, workerKey)
+	if e != nil {
 		return e
 	}
 	if resp.Count == 0 {
@@ -356,9 +356,9 @@ func(c *Client) UpdateWorkerHeartbeat(ctx context.Context,workerID string,heartb
 	return err
 }
 
-func(c *Client) AssignPendingTasks(ctx context.Context,t *task.Task,workerID string) (bool,error){
-	if t==nil{
-		return false,fmt.Errorf("task cannot be nil")
+func (c *Client) AssignPendingTasks(ctx context.Context, t *task.Task, workerID string) (bool, error) {
+	if t == nil {
+		return false, fmt.Errorf("task cannot be nil")
 	}
 	pendingBytes, err := json.Marshal(task.Pending)
 	if err != nil {

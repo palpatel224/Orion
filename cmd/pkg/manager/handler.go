@@ -1,29 +1,32 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"errors"
-	"context"
-	"time"
+	"orchestrator/store"
 	"orchestrator/task"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"orchestrator/store"
 )
 
-func (a *Api) ForwardToLeader(w http.ResponseWriter,r *http.Request) bool{
-	if a.Manager==nil || a.Manager.isLeader(){
+func (a *Api) ForwardToLeader(w http.ResponseWriter, r *http.Request) bool {
+	if a.Manager == nil || a.Manager.isLeader() {
 		return false
 	}
-	ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second)
+	log.Printf("ForwardToLeader: forwarding %s %s to leader", r.Method, r.URL.Path)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	addr,err:=a.Manager.LeaderAddress(ctx)
-	if err!=nil || addr==""{
+	addr, err := a.Manager.LeaderAddress(ctx)
+	log.Printf("ForwardToLeader: LeaderAddress returned addr=%s, err=%v", addr, err)
+	if err != nil || addr == "" {
 		msg := "leader unavailable; cannot forward request"
 		if err != nil {
 			msg = fmt.Sprintf("leader unavailable: %v", err)
@@ -33,19 +36,19 @@ func (a *Api) ForwardToLeader(w http.ResponseWriter,r *http.Request) bool{
 		return true
 	}
 
-	targetURL:=fmt.Sprintf("http://%s%s",addr,r.URL.RequestURI())
-	req,err:=http.NewRequestWithContext(ctx,r.Method,targetURL,r.Body)
+	targetURL := fmt.Sprintf("http://%s%s", addr, r.URL.RequestURI())
+	req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: "failed to build forward request"})
 		return true
 	}
-	req.Header=r.Header.Clone()
+	req.Header = r.Header.Clone()
 
-	resp,err:=a.HTTPClient().Do(req)
+	resp, err := a.HTTPClient().Do(req)
 	//headers recieved but response is still coming from network
-	if err!=nil{
-		http.Redirect(w,req,targetURL, http.StatusTemporaryRedirect)
+	if err != nil {
+		http.Redirect(w, req, targetURL, http.StatusTemporaryRedirect)
 		return true
 	}
 	//once reading is done close the connections
@@ -65,7 +68,7 @@ func (a *Api) ForwardToLeader(w http.ResponseWriter,r *http.Request) bool{
 	return true
 }
 
-func(a *Api) RegisterWorkerHandler(w http.ResponseWriter,r *http.Request) {
+func (a *Api) RegisterWorkerHandler(w http.ResponseWriter, r *http.Request) {
 	//If manager is not leader forward it and request will be handled
 	if a.ForwardToLeader(w, r) {
 		return
@@ -97,7 +100,7 @@ func(a *Api) RegisterWorkerHandler(w http.ResponseWriter,r *http.Request) {
 		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusBadRequest, Message: msg})
 		return
 	}
-	worker.Heartbeat=time.Now().UTC()
+	worker.Heartbeat = time.Now().UTC()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
@@ -113,33 +116,33 @@ func(a *Api) RegisterWorkerHandler(w http.ResponseWriter,r *http.Request) {
 	json.NewEncoder(w).Encode(worker)
 }
 
-//Handler for updating Worker Heartbeat
-func(a *Api) HeartbeatHandler(w http.ResponseWriter,r *http.Request){
-	if a.ForwardToLeader(w,r){
+// Handler for updating Worker Heartbeat
+func (a *Api) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
+	if a.ForwardToLeader(w, r) {
 		return
 	}
-	if !a.Manager.isLeader(){
-		msg:="manager is a follower;heartbeat update is disabled"
+	if !a.Manager.isLeader() {
+		msg := "manager is a follower;heartbeat update is disabled"
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode:http.StatusServiceUnavailable,Message:msg})
+		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: msg})
 		return
 	}
 	if a.Manager.Store == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	workerID:=chi.URLParam(r,"workerID")
-	if workerID==""{
+	workerID := chi.URLParam(r, "workerID")
+	if workerID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusBadRequest, Message: "worker id is required"})
 		return
 	}
-	ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	if err:=a.Manager.Store.UpdateWorkerHeartbeat(ctx,workerID,time.Now().UTC()); err!=nil{
-		if errors.Is(err,store.ErrNotFound){
+	if err := a.Manager.Store.UpdateWorkerHeartbeat(ctx, workerID, time.Now().UTC()); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode:http.StatusNotFound,Message:"Worker is not registered"})
+			json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusNotFound, Message: "Worker is not registered"})
 			return
 		}
 		msg := fmt.Sprintf("Error updating heartbeat for worker %s: %v", workerID, err)
@@ -152,24 +155,30 @@ func(a *Api) HeartbeatHandler(w http.ResponseWriter,r *http.Request){
 }
 
 func (a *Api) StartTaskHandler(w http.ResponseWriter, r *http.Request) {
-	if a.ForwardToLeader(w,r){
+	log.Printf("StartTaskHandler: received POST request")
+	if a.ForwardToLeader(w, r) {
+		log.Printf("StartTaskHandler: forwarded to leader")
 		return
 	}
-	if !a.Manager.isLeader(){
-		msg:="Manager is follower;Task creation disabled"
+	log.Printf("StartTaskHandler: manager %s is leader=%v", a.Manager.ID, a.Manager.isLeader())
+	if !a.Manager.isLeader() {
+		msg := "Manager is follower;Task creation disabled"
+		log.Printf("StartTaskHandler: rejecting because follower: %s", msg)
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode:http.StatusServiceUnavailable,Message:msg})
+		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: msg})
 		return
 	}
+	log.Printf("StartTaskHandler: decoding task from request body")
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 
 	te := task.TaskEvent{}
 	err := d.Decode(&te)
+	log.Printf("StartTaskHandler: decode result: error=%v", err)
 
 	if err != nil {
 		msg := fmt.Sprintf("Error unmarshalling body: %v\n", err)
-		log.Printf(msg)
+		log.Print(msg)
 		w.WriteHeader(400)
 		e := ErrResponse{
 			HTTPStatusCode: 400,
@@ -179,10 +188,10 @@ func (a *Api) StartTaskHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if er:=a.Manager.AddTask(te);er!=nil{
-		msg:=fmt.Sprintf("Unable to add task : %v",er)
+	if er := a.Manager.AddTask(te); er != nil {
+		msg := fmt.Sprintf("Unable to add task : %v", er)
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode:http.StatusServiceUnavailable,Message:msg})
+		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: msg})
 		return
 	}
 
@@ -191,22 +200,57 @@ func (a *Api) StartTaskHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(te)
 }
 
-//check this start
+// check this start
 func (a *Api) GetTasksHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Forward to Leader so we never query a Follower's empty queue
+	if a.ForwardToLeader(w, r) {
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	json.NewEncoder(w).Encode(a.Manager.GetTasks())
+
+	// 2. Query the actual Etcd Database
+	if a.Manager.Store == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	records, err := a.Manager.Store.ListTasks(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 3. Extract the tasks from the DB records to match your CLI JSON
+	var tasks []task.Task
+	for _, record := range records {
+		if record.Task != nil {
+			tasks = append(tasks, *record.Task)
+		}
+	}
+
+	// Guarantee we return [] instead of null if empty
+	if tasks == nil {
+		tasks = []task.Task{}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(tasks)
 }
+
 //check this end
 
 func (a *Api) StopTaskHandler(w http.ResponseWriter, r *http.Request) {
 
-	if a.ForwardToLeader(w,r){
+	if a.ForwardToLeader(w, r) {
 		return
 	}
 
-	if !a.Manager.isLeader(){
-		msg:=fmt.Sprintf("Manager is a follower;task stop diabled")
+	if !a.Manager.isLeader() {
+		msg := "Manager is follower;task stop disabled"
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: msg})
 		return
@@ -219,9 +263,9 @@ func (a *Api) StopTaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tID, _ := uuid.Parse(taskID)
-	ctx,cancel:=context.WithTimeout(r.Context(),5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	existingTask,existingWorker,err:=a.Manager.etcdStore.GetTask(ctx,tID)
+	existingTask, existingWorker, err := a.Manager.etcdStore.GetTask(ctx, tID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			log.Printf("No task with ID %v found", tID)
@@ -243,7 +287,7 @@ func (a *Api) StopTaskHandler(w http.ResponseWriter, r *http.Request) {
 	taskCopy.State = task.Completed
 	te.Task = taskCopy
 	te.Task.RestartCount = existingTask.RestartCount
-	
+
 	// Preserve the worker assignment so it can be used during stop processing.
 	if existingWorker != "" {
 		if err := a.Manager.etcdStore.CreateTask(ctx, &te.Task, existingWorker); err != nil {
@@ -287,9 +331,9 @@ func (a *Api) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func(a *Api) GetNodesHandler(w http.ResponseWriter,r *http.Request){
-	w.Header().Set("Content-Type","application/json")
-	if a.Manager.Store == nil{
+func (a *Api) GetNodesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if a.Manager.Store == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: "store not configured"})
 		return

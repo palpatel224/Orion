@@ -1,0 +1,19 @@
+{
+    "ID": "550e8400-e29b-41d4-a716-446655440000",
+    "State": 0,
+    "Timestamp": "2026-03-03T00:00:00Z",
+    "Task": {
+        "ID": "00000000-0000-0000-0000-000000000000",
+        "Name": "test-task",
+        "State": 0,
+        "Image": "strm/helloworld-http",
+        "Memory": 1024,
+        "Disk": 1,
+        "ContainerId": "",
+        "ExposedPorts": null,
+        "PortBindings": null,
+        "RestartPolicy": "",
+        "HealthCheck": "",
+        "RestartCount": 0
+    }
+}

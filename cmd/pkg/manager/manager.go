@@ -1,26 +1,27 @@
 package manager
 
 import (
-	"orchestrator/task"
-	"encoding/json"
-	"github.com/docker/go-connections/nat"
-	"fmt"
-	"os"
-	"log"
-	"errors"
-	"sync"
-	"net/http"
 	"context"
-	"strings"
-	"time"
-	"github.com/golang-collections/collections/queue"
-	"go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/concurrency"
-	"go.etcd.io/etcd/api/v3/mvccpb"
-	"github.com/google/uuid"
-	"orchestrator/store"
-	"orchestrator/scheduler"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
 	"orchestrator/node"
+	"orchestrator/scheduler"
+	"orchestrator/store"
+	"orchestrator/task"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/docker/go-connections/nat"
+	"github.com/golang-collections/collections/queue"
+	"github.com/google/uuid"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
 type ManagerRole string
@@ -33,25 +34,25 @@ const (
 	ManagerRoleFollower ManagerRole = "follower"
 )
 
-type Manager struct{
-	ID                string
-	etcdStore         *store.Client
-	Store             store.Store
-	leaderKey         string
-	managerKey        string
-	role              ManagerRole
-	taskWatchStop     context.CancelFunc
-	scheduler         scheduler.Scheduler
-	roleMu            sync.RWMutex
-	electionStop      chan struct{}
-	WorkerClient      WorkerCommunicator
-	etcdSession       *concurrency.Session
-	AdvertiseAddr     string
-	initialWorkers    []string
-	Pending           queue.Queue
+type Manager struct {
+	ID             string
+	etcdStore      *store.Client
+	Store          store.Store
+	leaderKey      string
+	managerKey     string
+	role           ManagerRole
+	taskWatchStop  context.CancelFunc
+	scheduler      scheduler.Scheduler
+	roleMu         sync.RWMutex
+	electionStop   chan struct{}
+	WorkerClient   WorkerCommunicator
+	etcdSession    *concurrency.Session
+	AdvertiseAddr  string
+	initialWorkers []string
+	Pending        queue.Queue
 }
 
-type Config struct{
+type Config struct {
 	Workers       []string
 	ID            string
 	SchedulerType string
@@ -61,10 +62,10 @@ type Config struct{
 	WorkerClient  WorkerCommunicator
 }
 
-type Elector struct{
-	Session *concurrency.Session
+type Elector struct {
+	Session  *concurrency.Session
 	Election *concurrency.Election
-	ID string
+	ID       string
 }
 
 type managerInfo struct {
@@ -102,23 +103,23 @@ func defaultManagerID() string {
 	return uuid.New().String()
 }
 
-func NewWithConfig(cfg Config) *Manager{
-	role:=cfg.Role
-	if role==""{
-		role=ManagerRoleFollower
+func NewWithConfig(cfg Config) *Manager {
+	role := cfg.Role
+	if role == "" {
+		role = ManagerRoleFollower
 	}
 	id := cfg.ID
 	if id == "" {
 		id = defaultManagerID()
 	}
-	advertiseAddr:=cfg.AdvertiseAddr
+	advertiseAddr := cfg.AdvertiseAddr
 	if advertiseAddr == "" {
 		advertiseAddr = os.Getenv("ORION_MANAGER_ADDRESS")
 	}
 	var s scheduler.Scheduler
-	switch cfg.SchedulerType{
+	switch cfg.SchedulerType {
 	case "roundrobin":
-		s=&scheduler.RoundRobin{Name:"roundrobin"}
+		s = &scheduler.RoundRobin{Name: "roundrobin"}
 	// case "epvm":
 	// 	s = &scheduler.RoundRobin{Name: "rounfrobin"}
 	default:
@@ -172,16 +173,16 @@ func (m *Manager) startLeaderElection() {
 	go m.leaderElectionLoop()
 }
 
-func(m *Manager) watchLeaderKey(ctx context.Context,session *concurrency.Session){
-	if session==nil{
+func (m *Manager) watchLeaderKey(ctx context.Context, session *concurrency.Session) {
+	if session == nil {
 		return
 	}
-	client:=m.etcdStore.Cli
-	resp,err:=client.Get(ctx,m.leaderKey)
-	if err==nil{
+	client := m.etcdStore.Cli
+	resp, err := client.Get(ctx, m.leaderKey)
+	if err == nil {
 		if resp == nil || resp.Count == 0 {
 			m.tryAcquireLeadership(session)
-		}else if len(resp.Kvs) > 0 {
+		} else if len(resp.Kvs) > 0 {
 			info, decodeErr := decodeManagerInfo(resp.Kvs[0].Value)
 			if decodeErr != nil {
 				log.Printf("Manager %s: failed to decode leader info: %v", m.ID, decodeErr)
@@ -193,12 +194,12 @@ func(m *Manager) watchLeaderKey(ctx context.Context,session *concurrency.Session
 		}
 	}
 	watchOpts := []clientv3.OpOption{}
-	if resp!=nil{
-		watchOpts=append(watchOpts,clientv3.WithRev(resp.Header.Revision+1))
+	if resp != nil {
+		watchOpts = append(watchOpts, clientv3.WithRev(resp.Header.Revision+1))
 	}
 	watchChan := client.Watch(ctx, m.leaderKey, watchOpts...)
-	for watchResp:= range watchChan{
-		if watchResp.Canceled{
+	for watchResp := range watchChan {
+		if watchResp.Canceled {
 			return
 		}
 
@@ -225,25 +226,25 @@ func(m *Manager) watchLeaderKey(ctx context.Context,session *concurrency.Session
 	}
 }
 
-func(m *Manager) watchPendingTasks(ctx context.Context){
+func (m *Manager) watchPendingTasks(ctx context.Context) {
 	//Check for any pending tasks before starting watch
 	m.schedulePendingSnapshot()
-	
-	watchChan:=m.etcdStore.Cli.Watch(ctx,m.etcdStore.TaskPrefix(),clientv3.WithPrefix())
-	for{
-		select{
+
+	watchChan := m.etcdStore.Cli.Watch(ctx, m.etcdStore.TaskPrefix(), clientv3.WithPrefix())
+	for {
+		select {
 		case <-ctx.Done():
 			return
-		case watchResp,ok:=<-watchChan:
-			if !ok || watchResp.Canceled{
+		case watchResp, ok := <-watchChan:
+			if !ok || watchResp.Canceled {
 				return
 			}
-			for _,ev:= range watchResp.Events{
-				if ev.Type!=mvccpb.PUT{
+			for _, ev := range watchResp.Events {
+				if ev.Type != mvccpb.PUT {
 					continue
 				}
-				key:=string(ev.Kv.Key)
-				if !strings.HasSuffix(key,"/status"){
+				key := string(ev.Kv.Key)
+				if !strings.HasSuffix(key, "/status") {
 					continue
 				}
 				var state task.State
@@ -266,7 +267,7 @@ func(m *Manager) watchPendingTasks(ctx context.Context){
 	}
 }
 
-func parseTaskIDFromStateKey(key string) (uuid.UUID,error){
+func parseTaskIDFromStateKey(key string) (uuid.UUID, error) {
 	segments := strings.Split(strings.Trim(key, "/"), "/")
 	for idx, segment := range segments {
 		if segment == "tasks" && idx+1 < len(segments) {
@@ -276,100 +277,100 @@ func parseTaskIDFromStateKey(key string) (uuid.UUID,error){
 	return uuid.Nil, fmt.Errorf("could not parse task ID from key %s", key)
 }
 
-func (m *Manager) setRole(role ManagerRole){
+func (m *Manager) setRole(role ManagerRole) {
 	m.roleMu.Lock()
-	prev:=m.role
-	m.role=role
+	prev := m.role
+	m.role = role
 	m.roleMu.Unlock()
 
-	if prev==role{
+	if prev == role {
 		return
 	}
-	if role==ManagerRoleLeader{
+	if role == ManagerRoleLeader {
 		m.startTaskWatch()
-	}else{
+	} else {
 		m.stopTaskWatch()
 	}
 }
 
-func (m *Manager) startTaskWatch(){
-	if m.etcdStore == nil{
+func (m *Manager) startTaskWatch() {
+	if m.etcdStore == nil {
 		return
 	}
 	//Always stops any existing watch before starting a new one to avoid
 	//duplicate schedulers running after role changes
 	m.stopTaskWatch()
-	ctx,cancel:=context.WithCancel(context.Background())
-	m.taskWatchStop=cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	m.taskWatchStop = cancel
 	go m.watchPendingTasks(ctx)
 }
 
-func (m *Manager) stopTaskWatch(){
-	if m.taskWatchStop!=nil{
+func (m *Manager) stopTaskWatch() {
+	if m.taskWatchStop != nil {
 		m.taskWatchStop()
-		m.taskWatchStop=nil
+		m.taskWatchStop = nil
 	}
 }
 
-func (m *Manager) isLeader() bool{
+func (m *Manager) isLeader() bool {
 	m.roleMu.RLock()
-	role:=m.role
+	role := m.role
 	m.roleMu.RUnlock()
-	if role==ManagerRoleLeader{
-		return true;
+	if role == ManagerRoleLeader {
+		return true
 	}
-	return false;
+	return false
 }
 
-//Actually checks which tasks are pending
-func (m *Manager) schedulePendingSnapshot(){
-	if !m.isLeader() || m.etcdStore==nil || m.Store==nil{
+// Actually checks which tasks are pending
+func (m *Manager) schedulePendingSnapshot() {
+	if !m.isLeader() || m.etcdStore == nil || m.Store == nil {
 		return
 	}
-	ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	record,err:=m.Store.ListTasks(ctx)
-	if err!=nil{
-		log.Printf("Manager %v Unable to list tasks for pending snapshots %v\n",m.ID,err)
+	record, err := m.Store.ListTasks(ctx)
+	if err != nil {
+		log.Printf("Manager %v Unable to list tasks for pending snapshots %v\n", m.ID, err)
 		return
 	}
-	for _,rec:=range record{
-		if rec.Task!=nil && rec.Task.State==task.Pending{
+	for _, rec := range record {
+		if rec.Task != nil && rec.Task.State == task.Pending {
 			go m.tryToSchedulePendingTask(rec.Task.ID)
 		}
 	}
 }
 
-func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID){
-	if taskID == uuid.Nil{
+func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID) {
+	if taskID == uuid.Nil {
 		return
 	}
-	if m.Store==nil|| m.etcdStore==nil || !m.isLeader(){
+	if m.Store == nil || m.etcdStore == nil || !m.isLeader() {
 		return
 	}
-	ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-	resp,_,err:=m.Store.GetTask(ctx,taskID)
+	resp, _, err := m.Store.GetTask(ctx, taskID)
 	cancel()
-	if err!=nil{
-		log.Printf("Error in getting task %v from the etcd %v\n",taskID,err)
+	if err != nil {
+		log.Printf("Error in getting task %v from the etcd %v\n", taskID, err)
 		return
 	}
-	if resp.State!=task.Pending{
+	if resp.State != task.Pending {
 		return
 	}
-	workerctx,workerCancel:=context.WithTimeout(context.Background(),5*time.Second)
-	worker,err:=m.SelectWorker(workerctx,*resp)
+	workerctx, workerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	worker, err := m.SelectWorker(workerctx, *resp)
 	workerCancel()
-	if err!=nil{
-		log.Printf("Manager %s : no worker is selected for task %s : %v\n",m.ID,resp.ID,err)
+	if err != nil {
+		log.Printf("Manager %s : no worker is selected for task %s : %v\n", m.ID, resp.ID, err)
 		return
-	} 
+	}
 	//Now update it in the etcd
-	assignctx,assignCancel:=context.WithTimeout(context.Background(),5*time.Second)
-	succeeded,e:=m.etcdStore.AssignPendingTasks(assignctx,resp,worker.ID)
+	assignctx, assignCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	succeeded, e := m.etcdStore.AssignPendingTasks(assignctx, resp, worker.ID)
 	assignCancel()
-	if e!=nil{
+	if e != nil {
 		log.Printf("Manager %s: failed to assign task %s to worker %s: %v", m.ID, resp.ID, worker.ID, err)
 		return
 	}
@@ -377,23 +378,23 @@ func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID){
 		log.Printf("Manager %s: task %s was already scheduled by another manager", m.ID, resp.ID)
 		return
 	}
-	resp.State=task.Scheduled
-	m.dispatchTaskToWorker(*resp,worker)
+	resp.State = task.Scheduled
+	m.dispatchTaskToWorker(*resp, worker)
 }
 
-func(m *Manager) dispatchTaskToWorker(t task.Task,worker *store.Worker){
-	if worker == nil{
+func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
+	if worker == nil {
 		return
 	}
 	// send task to the worker
-	//if there is some error in sending task to worker or in scheduling 
+	//if there is some error in sending task to worker or in scheduling
 	//then it has to be rescheduled and in the etcd changes are to be chamgeed back
 
-	te:=task.TaskEvent{
-		ID:uuid.New(),
-		State:task.Scheduled,
-		Timestamp:time.Now().UTC(),
-		Task:t,
+	te := task.TaskEvent{
+		ID:        uuid.New(),
+		State:     task.Scheduled,
+		Timestamp: time.Now().UTC(),
+		Task:      t,
 	}
 	_, errResp, err := m.WorkerClient.StartTask(worker.Address, te)
 	if err != nil {
@@ -417,15 +418,15 @@ func(m *Manager) dispatchTaskToWorker(t task.Task,worker *store.Worker){
 	cancel()
 }
 
-func (m *Manager) resetTaskToPending(t task.Task){
-	if m.Store == nil{
+func (m *Manager) resetTaskToPending(t task.Task) {
+	if m.Store == nil {
 		return
 	}
-	t.State=task.Pending
-	ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
-	err:=m.Store.UpdateTaskState(ctx,&t,"")
+	t.State = task.Pending
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := m.Store.UpdateTaskState(ctx, &t, "")
 	defer cancel()
-	if err!=nil{
+	if err != nil {
 		log.Printf("Manager %s: failed to revert task %s to pending: %v", m.ID, t.ID, err)
 	}
 }
@@ -448,15 +449,15 @@ func (m *Manager) registerManager(session *concurrency.Session) error {
 	return err
 }
 
-func (m *Manager) activeWorkers(ctx context.Context) ([]store.Worker,error){
+func (m *Manager) activeWorkers(ctx context.Context) ([]store.Worker, error) {
 	if m.Store == nil {
 		return nil, errors.New("store not configured")
 	}
-	workers,err:=m.Store.ListWorkers(ctx)
-	if err!=nil{
-		return nil,err
+	workers, err := m.Store.ListWorkers(ctx)
+	if err != nil {
+		return nil, err
 	}
-	cutoff:=time.Now().UTC().Add(-heartbeatStaleAfter)
+	cutoff := time.Now().UTC().Add(-heartbeatStaleAfter)
 	live := make([]store.Worker, 0, len(workers))
 	for _, w := range workers {
 		if w.Heartbeat.After(cutoff) {
@@ -562,9 +563,9 @@ func (m *Manager) tryAcquireLeadership(session *concurrency.Session) bool {
 	return false
 }
 
-func (m *Manager) SelectWorker(ctx context.Context,t task.Task) (*store.Worker,error) {
-	if m.Store==nil{
-		return nil,errors.New("store not configured ")
+func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker, error) {
+	if m.Store == nil {
+		return nil, errors.New("store not configured ")
 	}
 	workers, err := m.activeWorkers(ctx)
 	if err != nil {
@@ -577,73 +578,72 @@ func (m *Manager) SelectWorker(ctx context.Context,t task.Task) (*store.Worker,e
 		n := node.NewNode(w.ID, w.Address, "worker")
 		nodes = append(nodes, n)
 	}
-	//now select candidates 
-	candidates:=m.scheduler.SelectCandidateNodes(t,nodes)
-	if len(candidates) == 0{
-		return nil,fmt.Errorf("There is no available candidate that match resource requirement for task\n")
+	//now select candidates
+	candidates := m.scheduler.SelectCandidateNodes(&t, nodes)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("There is no available candidate that match resource requirement for task\n")
 	}
-	scores:=m.scheduler.Score(t,nodes)
-	selected_candidates:=m.scheduler.Pick(scores,candidates)
-	if selected_candidates==nil{
-		return nil,fmt.Errorf("Scheduler failed to pick a worker ")
+	scores := m.scheduler.Score(&t, nodes)
+	selected_candidates := m.scheduler.Pick(scores, candidates)
+	if selected_candidates == nil {
+		return nil, fmt.Errorf("Scheduler failed to pick a worker ")
 	}
-	selectedWorker,ok:=workerMap[selected_candidates.Name]
-	if !ok{
-		return nil,fmt.Errorf("Selected worker not found with ID name %v\n",selected_candidates.Name)
+	selectedWorker, ok := workerMap[selected_candidates.ID]
+	if !ok {
+		return nil, fmt.Errorf("Selected worker not found with ID %v\n", selected_candidates.ID)
 	}
-	return &selectedWorker,nil
+	return &selectedWorker, nil
 }
 
-
-func (m *Manager) updateTasks(){
-	if m.Store==nil{
-		return 
+func (m *Manager) updateTasks() {
+	if m.Store == nil {
+		return
 	}
-	if !m.isLeader(){
+	if !m.isLeader() {
 		log.Printf("Manager is not the leader\n")
 		return
-	} 
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	workers, err := m.activeWorkers(ctx)
 	cancel()
-	if err!=nil{
-		log.Printf("Error in getting active workers %v\n",err)
+	if err != nil {
+		log.Printf("Error in getting active workers %v\n", err)
 		return
 	}
-	if len(workers)==0{
+	if len(workers) == 0 {
 		fmt.Printf("There is no active worker currently \n")
 		return
 	}
-	for _,w:=range workers{
-		tasks,er:=m.WorkerClient.FetchTasks(w.Address)
-		if er!=nil{
-			log.Printf("Error in fetching tasks from worker %v : %v\n",w.ID,er)
+	for _, w := range workers {
+		tasks, er := m.WorkerClient.FetchTasks(w.Address)
+		if er != nil {
+			log.Printf("Error in fetching tasks from worker %v : %v\n", w.ID, er)
 			continue
 		}
-		for _,t:=range tasks{
-			ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
-			stored_task,_,e:=m.Store.GetTask(ctx,t.ID)
+		for _, t := range tasks {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			stored_task, _, e := m.Store.GetTask(ctx, t.ID)
 			cancel()
-			if e!=nil{
-				if errors.Is(e,store.ErrNotFound){
-					log.Printf("Task with this id not found %v : %v\v",t.ID,e)
+			if e != nil {
+				if errors.Is(e, store.ErrNotFound) {
+					log.Printf("Task with this id not found %v : %v\v", t.ID, e)
 					continue
 				}
-				log.Printf("Error retrieving task from etcd %v : %v\n",t.ID,e)
+				log.Printf("Error retrieving task from etcd %v : %v\n", t.ID, e)
 				continue
 			}
-			stored_task.State=t.State
-			stored_task.ContainerId=t.ContainerId
-			stored_task.StartTime=t.StartTime
-			stored_task.FinishTime=t.FinishTime
+			stored_task.State = t.State
+			stored_task.ContainerId = t.ContainerId
+			stored_task.StartTime = t.StartTime
+			stored_task.FinishTime = t.FinishTime
 
 			//now update the task in the etcd
 
-			updateContext,updateCancel:=context.WithTimeout(context.Background(),5*time.Second)
-			err:=m.Store.UpdateTaskState(updateContext,stored_task,w.ID)
+			updateContext, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := m.Store.UpdateTaskState(updateContext, stored_task, w.ID)
 			updateCancel()
-			if err!=nil{
-				log.Printf("Error in updating task in etcd %v\n",err)
+			if err != nil {
+				log.Printf("Error in updating task in etcd %v\n", err)
 				continue
 			}
 		}
@@ -651,40 +651,40 @@ func (m *Manager) updateTasks(){
 }
 
 func (m *Manager) SendWork() {
-	if !m.isLeader(){
+	if !m.isLeader() {
 		log.Printf("Manager is not leader \n")
 		return
 	}
-	if m.Pending.Len()==0{
+	if m.Pending.Len() == 0 {
 		log.Printf("No work in queue \n")
 		return
 	}
-	e:=m.Pending.Dequeue()
-	te,ok:=e.(task.TaskEvent)
-	if !ok{
+	e := m.Pending.Dequeue()
+	te, ok := e.(task.TaskEvent)
+	if !ok {
 		log.Printf("Unexpected item in queue: %T", e)
 		return
 	}
 	//task event pulled successfully from the pending queue
 
-	log.Printf("Task Event %v is pulled successfully from queue \n",te.ID)
-	if m.Store == nil{
+	log.Printf("Task Event %v is pulled successfully from queue \n", te.ID)
+	if m.Store == nil {
 		log.Println("Store not configured; cannot process task")
 		return
 	}
-	ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
-	existingTask,existingWorker,existingErr:=m.Store.GetTask(ctx,te.Task.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	existingTask, existingWorker, existingErr := m.Store.GetTask(ctx, te.Task.ID)
 	cancel()
-	if existingErr!=nil && !errors.Is(existingErr,store.ErrNotFound){
+	if existingErr != nil && !errors.Is(existingErr, store.ErrNotFound) {
 		log.Printf("Error retrieving task %s from store: %v", te.Task.ID, existingErr)
 		m.Pending.Enqueue(te)
 		return
 	}
 
 	//if the task is already running on a worker
-	if existingWorker!="" && existingTask!=nil{
-		if te.State==task.Completed && task.ValidStateTransition(existingTask.State,te.State){
-			m.StopTask(existingWorker,te.Task.ID.String())
+	if existingWorker != "" && existingTask != nil {
+		if te.State == task.Completed && task.ValidStateTransition(existingTask.State, te.State) {
+			m.StopTask(existingWorker, te.Task.ID.String())
 			return
 		}
 		log.Printf("Invalid request: existing task %s is in state %v and cannot transition to the completed state\n",
@@ -693,12 +693,12 @@ func (m *Manager) SendWork() {
 	}
 	//if existing worker is nil
 
-	t:=te.Task
-	ctx,cancel=context.WithTimeout(context.Background(),5*time.Second)
-	w,e:=m.SelectWorker(ctx,t)
+	t := te.Task
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	w, e := m.SelectWorker(ctx, t)
 	cancel()
-	if e!=nil{
-		log.Printf("Error selecting worker for task %v : %v\n",t.ID,e)
+	if e != nil {
+		log.Printf("Error selecting worker for task %v : %v\n", t.ID, e)
 		m.Pending.Enqueue(te)
 		return
 	}
@@ -731,13 +731,13 @@ func (m *Manager) SendWork() {
 	}
 }
 
-func(m *Manager) LeaderAddress(ctx context.Context) (string,error){
-	if m.isLeader(){
-		if m.AdvertiseAddr==""{
+func (m *Manager) LeaderAddress(ctx context.Context) (string, error) {
+	if m.isLeader() {
+		if m.AdvertiseAddr == "" {
 			log.Printf("Leader address not configured \n")
-			return "",errors.New("Advertise address not configured for leader")
+			return "", errors.New("Advertise address not configured for leader")
 		}
-		return m.AdvertiseAddr,nil
+		return m.AdvertiseAddr, nil
 	}
 	if m.etcdStore == nil {
 		return "", fmt.Errorf("etcd store not configured; cannot resolve leader")
@@ -788,33 +788,33 @@ func(m *Manager) LeaderAddress(ctx context.Context) (string,error){
 	return managerInfo.Address, nil
 }
 
-func(m *Manager) registerWorkers(ctx context.Context,worker []string){
-	if m.Store==nil{
+func (m *Manager) registerWorkers(ctx context.Context, worker []string) {
+	if m.Store == nil {
 		log.Printf("Etcd not configured \n")
 		return
 	}
-	if !m.isLeader(){
+	if !m.isLeader() {
 		log.Printf("Manager %s is in follower role; skipping worker registration", m.ID)
 		return
 	}
-	for _,w:=range worker{
-		meta:=store.Worker{ID:w,Address:w,Heartbeat:time.Now().UTC()}
-		if err:=m.Store.RegisterWorker(ctx,meta); err!=nil{
+	for _, w := range worker {
+		meta := store.Worker{ID: w, Address: w, Heartbeat: time.Now().UTC()}
+		if err := m.Store.RegisterWorker(ctx, meta); err != nil {
 			log.Printf("Error registering worker %s: %v", w, err)
 		}
 
 	}
-} 
+}
 
 func (m *Manager) GetTasks() []*task.Task {
-	if m.Store==nil{
+	if m.Store == nil {
 		log.Printf("Etcd store not intialised \n")
 		return []*task.Task{}
 	}
 
-    ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	taskRecord,err:=m.Store.ListTasks(ctx)
+	taskRecord, err := m.Store.ListTasks(ctx)
 	if err != nil {
 		log.Printf("Error retrieving tasks from store: %v", err)
 		return []*task.Task{}
@@ -826,8 +826,8 @@ func (m *Manager) GetTasks() []*task.Task {
 	return tasks
 }
 
-func(m *Manager) UpdateTasks(){
-	for{
+func (m *Manager) UpdateTasks() {
+	for {
 		if !m.isLeader() {
 			log.Printf("Manager %s is in follower role; skipping worker task sync", m.ID)
 			time.Sleep(15 * time.Second)
@@ -841,8 +841,8 @@ func(m *Manager) UpdateTasks(){
 	}
 }
 
-func(m *Manager) ProcessTasks(){
-	for{
+func (m *Manager) ProcessTasks() {
+	for {
 		if !m.isLeader() {
 			log.Printf("Manager %s is in follower role; skipping task processing", m.ID)
 			time.Sleep(10 * time.Second)
@@ -855,9 +855,8 @@ func(m *Manager) ProcessTasks(){
 	}
 }
 
-
-func getHostPort(ports nat.PortMap) *string{
-	for k,_:=range ports{
+func getHostPort(ports nat.PortMap) *string {
+	for k, _ := range ports {
 		return &(ports[k][0].HostPort)
 	}
 	return nil
@@ -916,29 +915,30 @@ func (m *Manager) checkTaskHealth(t task.Task) error {
 
 }
 
-func(m *Manager) doHealthChecks(){
-	for _,t:=range m.GetTasks(){
-		if t.State==task.Running && t.RestartCount<3{
-			if t.HealthCheck!=""{
-				err:=m.checkTaskHealth(*t)
-				if err!=nil{
-					if t.RestartCount<3{
+func (m *Manager) doHealthChecks() {
+	for _, t := range m.GetTasks() {
+		if t.State == task.Running && t.RestartCount < 3 {
+			if t.HealthCheck != "" {
+				err := m.checkTaskHealth(*t)
+				if err != nil {
+					if t.RestartCount < 3 {
 						m.RestartTask(t)
 					}
 				}
 			}
-		}else if t.State==task.Failed && t.RestartCount<3{
+		} else if t.State == task.Failed && t.RestartCount < 3 {
 			m.RestartTask(t)
 		}
 	}
 }
+
 //task is in running state ---> checkTaskHealth
 //task is in failed state --->attempt to restart the task
 //if the task's health check fails -->try to restart the task
 //rest all states like pending ,scheduled or completed there is no need to check health
 
-func(m *Manager) RestartTask(t *task.Task){
-	if !m.isLeader(){
+func (m *Manager) RestartTask(t *task.Task) {
+	if !m.isLeader() {
 		log.Printf("Manager %s is in follower role; skipping restart for task %s", m.ID, t.ID)
 		return
 	}
@@ -1009,9 +1009,9 @@ func (m *Manager) DoHealthChecks() {
 	}
 }
 
-func (m *Manager) StopTask(worker string,taskID string){
-	if !m.isLeader(){
-		log.Printf("Manager %s is in follower role; skipping stopping tasks",m.ID)
+func (m *Manager) StopTask(worker string, taskID string) {
+	if !m.isLeader() {
+		log.Printf("Manager %s is in follower role; skipping stopping tasks", m.ID)
 		return
 	}
 	err := m.WorkerClient.StopTask(worker, taskID)
@@ -1046,18 +1046,17 @@ func (m *Manager) StopTask(worker string,taskID string){
 	log.Printf("Task %s has been scheduled to be stopped", taskID)
 }
 
-
-func(m *Manager) AddTask(te task.TaskEvent) error{
-	if !m.isLeader(){
-		msg:=fmt.Sprintf("Manager is a follower;Adding task event is skipped")
-		return errors.New(msg)
+func (m *Manager) AddTask(te task.TaskEvent) error {
+	if !m.isLeader() {
+		log.Print("Manager is a follower;Adding task event is skipped")
+		return errors.New("Manager is a follower;Adding task event is skipped")
 	}
-	if m.Store==nil{
+	if m.Store == nil {
 		log.Printf("Etcd store not configured")
 		return errors.New("Etcd store not configured")
 	}
-	if te.State==task.Completed{
-		ctx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
+	if te.State == task.Completed {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, workerID, err := m.Store.GetTask(ctx, te.Task.ID)
 		if err != nil {
@@ -1071,11 +1070,11 @@ func(m *Manager) AddTask(te task.TaskEvent) error{
 		m.StopTask(workerID, te.Task.ID.String())
 		return nil
 	}
-	if te.Task.ID == uuid.Nil{
-		te.Task.ID=uuid.New()
+	if te.Task.ID == uuid.Nil {
+		te.Task.ID = uuid.New()
 	}
-	te.Task.State=task.Pending
-	te.Timestamp=time.Now().UTC()
+	te.Task.State = task.Pending
+	te.Timestamp = time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
