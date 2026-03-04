@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"orchestrator/node"
 	"orchestrator/scheduler"
+	"orchestrator/controlPlane"
 	"orchestrator/store"
 	"orchestrator/task"
 	"os"
@@ -50,6 +51,7 @@ type Manager struct {
 	AdvertiseAddr  string
 	initialWorkers []string
 	Pending        queue.Queue
+	AppController  controlPlane.AppController
 }
 
 type Config struct {
@@ -74,20 +76,55 @@ type managerInfo struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+func (m *Manager) reconcileAllApps(ctx context.Context) {
+
+	apps, err := m.Store.ListApps(ctx)
+	if err != nil {
+		log.Println("Failed to list apps:", err)
+		return
+	}
+
+	for _, app := range apps {
+		err := m.AppController.reconcileApp(ctx, app)
+		if err != nil {
+			log.Println("Reconcile failed for app:", app.Name)
+		}
+	}
+}
+
 func (m *Manager) CurrentRole() ManagerRole {
 	m.roleMu.RLock()
 	defer m.roleMu.RUnlock()
 	return m.role
 }
 
-func (m *Manager) onBecameLeader() {
+
+func (m *Manager) runAppController(ctx context.Context){
+	ticker:=time.NewTicker(10*time.Second)
+	defer ticker.Stop()
+
+	for{
+		select{
+		case <-ctx.Done():
+			log.Printf("AppController stopper")
+			return
+		case<-ticker.C:
+			if err:=m.reconcileAllApps(ctx);err!=nil{
+				log.Printf("Reconcile error:",err)
+			}
+		}	
+	}
+}
+
+func (m *Manager) onBecameLeader(ctx context.Context) {
 	wasLeader := m.isLeader()
 	m.setRole(ManagerRoleLeader)
 	if !wasLeader {
 		log.Printf("Manager %s: became leader", m.ID)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		m.registerWorkers(ctx, m.initialWorkers)
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		m.registerWorkers(c, m.initialWorkers)
 		cancel()
+		go m.runAppController(leaderCtx)
 	}
 }
 
@@ -556,7 +593,7 @@ func (m *Manager) tryAcquireLeadership(session *concurrency.Session) bool {
 	}
 	fmt.Printf("Not failed \n")
 	if resp.Succeeded {
-		m.onBecameLeader()
+		m.onBecameLeader(session.Ctx())
 		return true
 	}
 	m.setRole(ManagerRoleFollower)

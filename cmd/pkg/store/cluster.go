@@ -35,6 +35,14 @@ func NewEtcdStore(endpoints []string) (*Client, error) {
 	return &Client{Cli: cli}, nil
 }
 
+func(c *Client) servicePrefix(appName string) string{
+	return fmt.Sprintf("/apps/%s",appName)
+}
+
+func(c *Client) appPrefix() string{
+	return fmt.Sprintf("/apps");
+}
+
 func (c *Client) taskPrefix() string {
 	return fmt.Sprintf("/tasks/")
 }
@@ -73,6 +81,114 @@ func (c *Client) ManagerKey(id string) string {
 func (c *Client) workerKey(id string) string {
 	return fmt.Sprintf("/worker/%s", id)
 }
+
+func(c *Client) GetApp(ctx context.Context,name string)(*controlPlane.AppGroup,error){
+	key:=c.servicePrefix(name)
+	resp,err:=c.Cli.Get(ctx,key)
+	if err!=nil{
+		return nil,err
+	}
+	if len(resp.Kvs)==0{
+		return nil,fmt.Errorf("app not found")
+	}
+	var app controlPlane.AppGroup
+	if err:=json.Unmarshal(resp.Kvs[0].Value,&app);err!=nil{
+		return nil,err
+	}
+	return &app,nil
+}
+
+func(c *Client) ListApp(ctx context.Context) ([]*control.controlPlane.AppGroup,error){
+	prefix:=c.appPrefix()
+	resp,err:=c.Cli.Get(ctx,prefix,clientv3.WithPrefix())
+	if err!=nil{
+		return nil,err
+	}
+	var apps []*controlPlane.AppGroup
+	for _,kv:=range resp.Kvs{
+		var app controlPlane.AppGroup
+		if err:=json.Unmarshal(kv.Value,&app);err!=nil{
+			return nil,err
+		}
+		apps=append(apps,&app)
+	}
+	return apps,nil
+}
+
+func(c *Client) SaveApp(ctx context.Context,app *controlPlane.AppGroup)error{
+	key:=c.servicePrefix(app.Name)
+	data,err:=json.Marshal(app)
+	if err!=nil{
+		return err
+	}
+	resp,err:=c.Cli.Get(ctx,key)
+	if err!=nil{
+		return err
+	}
+	if len(resp.Kvs)==0{
+		_,err=c.Cli.Put(ctx,string(data))
+		return err
+	}
+	//if exists then update
+
+	txnResp,err:=c.Cli.Txn(ctx).If(clientv3.Compare(clientv3.ModRevision(key),"=",resp.Kvs[0].ModRevision,)).Then(clientv3.OpPut(key,string(data))).Commit()
+	if err!=nil{
+		return err
+	}
+	if txnResp.Succeeded{
+		return fmt.Errorf("Conflict : app modified by someone else")
+	}
+	return nil
+}
+
+func (c *Client) DeleteService(ctx context.Context, appName string, serviceName string) error {
+    key := fmt.Sprintf("/apps/%s", appName)
+
+    // 1. Get the data AND the Revision
+    resp, err := c.Cli.Get(ctx, key)
+    if err != nil {
+        return err
+    }
+    if len(resp.Kvs) == 0 {
+        return fmt.Errorf("app not found")
+    }
+    
+    // Save the revision for the transaction check
+    rev := resp.Kvs[0].ModRevision
+
+    var app controlPlane.AppGroup
+    if err := json.Unmarshal(resp.Kvs[0].Value, &app); err != nil {
+        return err
+    }
+
+    if _, exists := app.Services[serviceName]; !exists {
+        return fmt.Errorf("service not found")
+    }
+
+    // 2. Modify
+    delete(app.Services, serviceName)
+    updated, err := json.Marshal(app)
+    if err != nil {
+        return err
+    }
+
+    // 3. Execute Transaction
+    // "If the key's revision hasn't changed, Put the update. Otherwise, fail."
+    txnResp, err := c.Cli.Txn(ctx).
+        If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).
+        Then(clientv3.OpPut(key, string(updated))).
+        Commit()
+
+    if err != nil {
+        return err
+    }
+    if !txnResp.Succeeded {
+        return fmt.Errorf("conflict detected: app was modified by another process")
+    }
+
+    return nil
+}
+
 
 func (c *Client) AddTaskEvent(key string, t task.TaskEvent) uint32 {
 	data, err := json.Marshal(t)
