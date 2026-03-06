@@ -24,4 +24,9 @@ type Store interface {
 	RegisterWorker(ctx context.Context, worker Worker) error
 	ListWorkers(ctx context.Context) ([]Worker, error)
 	UpdateWorkerHeartbeat(ctx context.Context, workerID string, heartbeat time.Time) error
+	//for applications
+	SaveApp(ctx context.Context,app *controlPlane.AppGroup)error
+	GetApp(ctx context.Context,name string)(*controlPlane.AppGroup,error)
+	ListApp(ctx context.Context)([]*controlPlane.AppGroup,error)
+	DeleteService(ctx context.Context, appName string, serviceName string) error
 }
