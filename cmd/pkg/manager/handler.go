@@ -36,6 +36,12 @@ func (a *Api) ForwardToLeader(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
+	if a.Manager.AdvertiseAddr != "" && addr == a.Manager.AdvertiseAddr {
+		log.Printf("ForwardToLeader: resolved leader address %s to local manager %s; serving locally", addr, a.Manager.ID)
+		a.Manager.onBecameLeader()
+		return false
+	}
+
 	targetURL := fmt.Sprintf("http://%s%s", addr, r.URL.RequestURI())
 	req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, r.Body)
 	if err != nil {
@@ -48,7 +54,8 @@ func (a *Api) ForwardToLeader(w http.ResponseWriter, r *http.Request) bool {
 	resp, err := a.HTTPClient().Do(req)
 	//headers recieved but response is still coming from network
 	if err != nil {
-		http.Redirect(w, req, targetURL, http.StatusTemporaryRedirect)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: http.StatusServiceUnavailable, Message: fmt.Sprintf("leader unavailable: failed to proxy request: %v", err)})
 		return true
 	}
 	//once reading is done close the connections

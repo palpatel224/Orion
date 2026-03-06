@@ -68,3 +68,51 @@ func (c *Client) SubmitTask(taskJSON []byte) error {
 
 	return nil
 }
+
+// Node represents a worker node in the cluster
+type Node struct {
+	ID        string `json:"ID"`
+	Address   string `json:"Address"`
+	Heartbeat string `json:"Heartbeat"`
+}
+
+// GetNodes fetches the list of active worker nodes from the manager
+func (c *Client) GetNodes() ([]Node, error) {
+	url := fmt.Sprintf("%s/nodes", c.ManagerAddr)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned status: %d", resp.StatusCode)
+	}
+
+	var nodes []Node
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+// StopTask sends a request to gracefully terminate a task
+func (c *Client) StopTask(taskID string) error {
+	url := fmt.Sprintf("%s/tasks/%s", c.ManagerAddr, taskID)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to stop task, server returned status: %d", resp.StatusCode)
+	}
+	return nil
+}

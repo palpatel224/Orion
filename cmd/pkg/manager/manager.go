@@ -755,9 +755,21 @@ func (m *Manager) LeaderAddress(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no leader present")
 	}
 
-	info, err := decodeManagerInfo(resp.Kvs[0].Value)
+	leaderKV := resp.Kvs[0]
+	if leaderKV.Lease == 0 {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = m.etcdStore.Cli.Delete(cleanupCtx, m.leaderKey)
+		cleanupCancel()
+		return "", fmt.Errorf("stale leader record removed")
+	}
+
+	info, err := decodeManagerInfo(leaderKV.Value)
 	if err != nil {
 		return "", err
+	}
+
+	if info.ID == m.ID && m.AdvertiseAddr != "" {
+		return m.AdvertiseAddr, nil
 	}
 
 	if info.Address != "" {
@@ -773,7 +785,18 @@ func (m *Manager) LeaderAddress(ctx context.Context) (string, error) {
 	}
 
 	if managerResp.Count == 0 || len(managerResp.Kvs) == 0 {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = m.etcdStore.Cli.Delete(cleanupCtx, m.leaderKey)
+		cleanupCancel()
 		return "", fmt.Errorf("leader metadata missing for %s", info.ID)
+	}
+
+	if managerResp.Kvs[0].Lease == 0 {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = m.etcdStore.Cli.Delete(cleanupCtx, m.leaderKey)
+		_, _ = m.etcdStore.Cli.Delete(cleanupCtx, managerKey)
+		cleanupCancel()
+		return "", fmt.Errorf("stale leader metadata removed")
 	}
 
 	managerInfo, err := decodeManagerInfo(managerResp.Kvs[0].Value)

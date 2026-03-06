@@ -282,7 +282,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 }
 
 func (c *Client) ListWorkers(ctx context.Context) ([]Worker, error) {
-	key := fmt.Sprintf("/worker/")
+	key := fmt.Sprintf("/worker")
 	resp, err := c.Cli.Get(ctx, key, clientv3.WithPrefix())
 	if err != nil {
 		return nil, err
@@ -296,7 +296,7 @@ func (c *Client) ListWorkers(ctx context.Context) ([]Worker, error) {
 
 	for _, kv := range resp.Kvs {
 		segments := strings.Split(strings.TrimPrefix(string(kv.Key), "/"), "/")
-		if len(segments) < 2 || segments[0] != "workers" {
+		if len(segments) < 2 || (segments[0] != "workers" && segments[0] != "worker") {
 			continue
 		}
 		id := segments[1]

@@ -8,6 +8,8 @@ import (
 	"orchestrator/store"
 	"orchestrator/task"
 	"orchestrator/worker"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-collections/collections/queue"
@@ -48,7 +50,15 @@ func main() {
 	go wapi3.Start()
 	go w3.RunTask()
 
-	endpoints := []string{"localhost:2379"}
+	etcdEndpoints := os.Getenv("ORION_ETCD_ENDPOINTS")
+	if etcdEndpoints == "" {
+		etcdEndpoints = "localhost:12379"
+	}
+
+	endpoints := strings.Split(etcdEndpoints, ",")
+	for i := range endpoints {
+		endpoints[i] = strings.TrimSpace(endpoints[i])
+	}
 	etcdStore, err := store.NewEtcdStore(endpoints)
 	if err != nil {
 		log.Fatalf("Failed to initialize etcd store: %v", err)
