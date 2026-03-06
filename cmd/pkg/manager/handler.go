@@ -267,21 +267,69 @@ func (a *Api) StopTaskHandler(w http.ResponseWriter, r *http.Request) {
 	if taskID == "" {
 		log.Printf("No taskID passed in request.\n")
 		w.WriteHeader(400)
+		return
 	}
 
-	tID, _ := uuid.Parse(taskID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	existingTask, existingWorker, err := a.Manager.etcdStore.GetTask(ctx, tID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			log.Printf("No task with ID %v found", tID)
-			w.WriteHeader(404)
+
+	// Try to parse as full UUID first
+	tID, parseErr := uuid.Parse(taskID)
+	var existingTask *task.Task
+	var existingWorker string
+	var err error
+
+	if parseErr != nil || tID == uuid.Nil {
+		// If not a valid UUID, treat as short ID and search for matching task
+		allTasks, listErr := a.Manager.Store.ListTasks(ctx)
+		if listErr != nil {
+			log.Printf("Error listing tasks: %v", listErr)
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: 500, Message: "failed to list tasks"})
 			return
 		}
-		log.Printf("Error retrieving task %v: %v", tID, err)
-		w.WriteHeader(500)
-		return
+
+		var found bool
+		for _, taskRec := range allTasks {
+			if taskRec.Task == nil {
+				continue
+			}
+
+			fullID := taskRec.Task.ID.String()
+			if len(taskID) > len(fullID) {
+				continue
+			}
+
+			if fullID[:len(taskID)] == taskID {
+				existingTask = taskRec.Task
+				existingWorker = taskRec.WorkerID
+				tID = taskRec.Task.ID
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			log.Printf("No task with ID matching %v found", taskID)
+			w.WriteHeader(404)
+			json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: 404, Message: fmt.Sprintf("task %s not found", taskID)})
+			return
+		}
+	} else {
+		// Full UUID provided
+		existingTask, existingWorker, err = a.Manager.etcdStore.GetTask(ctx, tID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				log.Printf("No task with ID %v found", tID)
+				w.WriteHeader(404)
+				json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: 404, Message: fmt.Sprintf("task %s not found", taskID)})
+				return
+			}
+			log.Printf("Error retrieving task %v: %v", tID, err)
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(ErrResponse{HTTPStatusCode: 500, Message: "failed to retrieve task"})
+			return
+		}
 	}
 
 	te := task.TaskEvent{

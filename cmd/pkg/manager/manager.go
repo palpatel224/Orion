@@ -1081,13 +1081,15 @@ func (m *Manager) AddTask(te task.TaskEvent) error {
 	if te.State == task.Completed {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, workerID, err := m.Store.GetTask(ctx, te.Task.ID)
+		existingTask, workerID, err := m.Store.GetTask(ctx, te.Task.ID)
 		if err != nil {
 			return err
 		}
 
 		if workerID == "" {
-			return fmt.Errorf("no worker assignment found for task %s", te.Task.ID)
+			existingTask.State = task.Completed
+			existingTask.FinishTime = time.Now().UTC()
+			return m.Store.UpdateTaskState(ctx, existingTask, "")
 		}
 
 		m.StopTask(workerID, te.Task.ID.String())
