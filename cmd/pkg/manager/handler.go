@@ -38,7 +38,7 @@ func (a *Api) ForwardToLeader(w http.ResponseWriter, r *http.Request) bool {
 
 	if a.Manager.AdvertiseAddr != "" && addr == a.Manager.AdvertiseAddr {
 		log.Printf("ForwardToLeader: resolved leader address %s to local manager %s; serving locally", addr, a.Manager.ID)
-		a.Manager.onBecameLeader()
+		a.Manager.onBecameLeader(nil)
 		return false
 	}
 

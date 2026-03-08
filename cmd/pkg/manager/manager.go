@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	control "orchestrator/controlPlane"
 	"orchestrator/node"
 	"orchestrator/scheduler"
-	"orchestrator/controlPlane"
 	"orchestrator/store"
 	"orchestrator/task"
 	"os"
@@ -51,7 +52,8 @@ type Manager struct {
 	AdvertiseAddr  string
 	initialWorkers []string
 	Pending        queue.Queue
-	AppController  controlPlane.AppController
+	AppController  *control.AppController
+	NetworkControl *control.NetworkController
 }
 
 type Config struct {
@@ -77,18 +79,12 @@ type managerInfo struct {
 }
 
 func (m *Manager) reconcileAllApps(ctx context.Context) {
-
-	apps, err := m.Store.ListApps(ctx)
-	if err != nil {
-		log.Println("Failed to list apps:", err)
+	if m.AppController == nil {
 		return
 	}
 
-	for _, app := range apps {
-		err := m.AppController.reconcileApp(ctx, app)
-		if err != nil {
-			log.Println("Reconcile failed for app:", app.Name)
-		}
+	if err := m.AppController.ReconcileAll(ctx); err != nil {
+		log.Println("Failed to reconcile apps:", err)
 	}
 }
 
@@ -98,33 +94,38 @@ func (m *Manager) CurrentRole() ManagerRole {
 	return m.role
 }
 
-
-func (m *Manager) runAppController(ctx context.Context){
-	ticker:=time.NewTicker(10*time.Second)
+func (m *Manager) runAppController(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	for{
-		select{
+	for {
+		select {
 		case <-ctx.Done():
 			log.Printf("AppController stopper")
 			return
-		case<-ticker.C:
-			if err:=m.reconcileAllApps(ctx);err!=nil{
-				log.Printf("Reconcile error:",err)
-			}
-		}	
+		case <-ticker.C:
+			m.reconcileAllApps(ctx)
+		}
 	}
 }
 
-func (m *Manager) onBecameLeader(ctx context.Context) {
+func (m *Manager) onBecameLeader(session *concurrency.Session) {
 	wasLeader := m.isLeader()
 	m.setRole(ManagerRoleLeader)
 	if !wasLeader {
 		log.Printf("Manager %s: became leader", m.ID)
-		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		m.registerWorkers(c, m.initialWorkers)
 		cancel()
-		go m.runAppController(leaderCtx)
+
+		if session != nil && m.AppController != nil {
+			appCtx, appCancel := context.WithCancel(context.Background())
+			go func() {
+				<-session.Done()
+				appCancel()
+			}()
+			go m.runAppController(appCtx)
+		}
 	}
 }
 
@@ -178,7 +179,10 @@ func NewWithConfig(cfg Config) *Manager {
 		AdvertiseAddr:  advertiseAddr,
 		initialWorkers: initialWorkers,
 		electionStop:   make(chan struct{}),
+		NetworkControl: control.NewNetworkController(),
 	}
+
+	m.AppController = control.NewAppController(cfg.Store)
 
 	if etcdStore, ok := cfg.Store.(*store.Client); ok {
 		m.etcdStore = etcdStore
@@ -593,7 +597,7 @@ func (m *Manager) tryAcquireLeadership(session *concurrency.Session) bool {
 	}
 	fmt.Printf("Not failed \n")
 	if resp.Succeeded {
-		m.onBecameLeader(session.Ctx())
+		m.onBecameLeader(session)
 		return true
 	}
 	m.setRole(ManagerRoleFollower)
@@ -615,19 +619,56 @@ func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker,
 		n := node.NewNode(w.ID, w.Address, "worker")
 		nodes = append(nodes, n)
 	}
+
+	if m.NetworkControl != nil {
+		workerIDs := make([]string, 0, len(workers))
+		for _, w := range workers {
+			workerIDs = append(workerIDs, w.ID)
+		}
+		m.NetworkControl.EnsureDefaultLinks(workerIDs)
+	}
+
 	//now select candidates
 	candidates := m.scheduler.SelectCandidateNodes(&t, nodes)
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("There is no available candidate that match resource requirement for task\n")
 	}
-	scores := m.scheduler.Score(&t, nodes)
-	selected_candidates := m.scheduler.Pick(scores, candidates)
-	if selected_candidates == nil {
-		return nil, fmt.Errorf("Scheduler failed to pick a worker ")
+
+	baseScores := m.scheduler.Score(&t, nodes)
+	bestID := ""
+	bestScore := math.Inf(-1)
+
+	for _, candidate := range candidates {
+		base := baseScores[candidate.ID]
+		network := 1.0
+		if m.NetworkControl != nil {
+			peers := make([]string, 0, len(nodes)-1)
+			for _, peer := range nodes {
+				if peer.ID != candidate.ID {
+					peers = append(peers, peer.ID)
+				}
+			}
+			network = m.NetworkControl.ScoreNode(candidate.ID, peers)
+		}
+
+		finalScore := control.CombineScores(base, network)
+		if finalScore > bestScore || (finalScore == bestScore && candidate.ID < bestID) {
+			bestScore = finalScore
+			bestID = candidate.ID
+		}
 	}
-	selectedWorker, ok := workerMap[selected_candidates.ID]
+
+	if bestID == "" {
+		selectedCandidate := m.scheduler.Pick(baseScores, candidates)
+		if selectedCandidate == nil {
+			return nil, fmt.Errorf("Scheduler failed to pick a worker")
+		}
+		bestID = selectedCandidate.ID
+	}
+
+	selectedWorker, ok := workerMap[bestID]
 	if !ok {
-		return nil, fmt.Errorf("Selected worker not found with ID %v\n", selected_candidates.ID)
+		return nil, fmt.Errorf("selected worker not found with ID %v", bestID)
 	}
 	return &selectedWorker, nil
 }

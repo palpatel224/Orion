@@ -1,52 +1,65 @@
 package control
 
-import(
-	"orchestrator/node"
-	"orchestrator/store"
-	"github.com/google/uuid"
+import (
+	"context"
+	"fmt"
 )
 
-const(
-	AppDraft AppStatus = "Draft"
-	AppActive AppStatus ="Active"
-)
+type AppStatus string
 
-type AppController struct{
-	store store.Client
-}
+const (
+	AppDraft  AppStatus = "Draft"
+	AppActive AppStatus = "Active"
+)
 
 type Dependency struct {
-	TargetService string
-	MaxNetworkCost int
+	TargetService  string `json:"target_service"`
+	MaxNetworkCost int    `json:"max_network_cost"`
 }
 
 type ServiceSpec struct {
-	Name     string
-	Image    string
-	CPU      int64
-	Memory   int64
-	Disk     int64
-	Replicas int
+	Name     string `json:"name"`
+	Image    string `json:"image"`
+	CPU      int64  `json:"cpu"`
+	Memory   int64  `json:"memory"`
+	Disk     int64  `json:"disk"`
+	Replicas int    `json:"replicas"`
 }
 
 type AppGroup struct {
-	Name string
-	Version int
-	Service map[string]*ServiceSpec
-	Dependencies map[string][]Dependency
-	Status AppStatus
+	Name         string                  `json:"name"`
+	Version      int                     `json:"version"`
+	Services     map[string]*ServiceSpec `json:"services"`
+	Dependencies map[string][]Dependency `json:"dependencies"`
+	Status       AppStatus               `json:"status"`
+}
+
+type AppStore interface {
+	SaveApp(ctx context.Context, app *AppGroup) error
+	GetApp(ctx context.Context, name string) (*AppGroup, error)
+	ListApp(ctx context.Context) ([]*AppGroup, error)
+	DeleteService(ctx context.Context, appName string, serviceName string) error
+}
+
+type AppController struct {
+	store AppStore
+}
+
+func NewAppController(store AppStore) *AppController {
+	if store == nil {
+		return nil
+	}
+	return &AppController{store: store}
 }
 
 func TopologicalSort(services map[string]*ServiceSpec, deps map[string][]Dependency) ([]string, error) {
 	inDegree := make(map[string]int)
 	graph := make(map[string][]string)
 
-	// initialize
 	for name := range services {
 		inDegree[name] = 0
 	}
 
-	// build graph
 	for from, depList := range deps {
 		for _, dep := range depList {
 			to := dep.TargetService
@@ -55,7 +68,6 @@ func TopologicalSort(services map[string]*ServiceSpec, deps map[string][]Depende
 		}
 	}
 
-	// queue for nodes with 0 in-degree
 	queue := []string{}
 	for svc, degree := range inDegree {
 		if degree == 0 {
@@ -64,7 +76,6 @@ func TopologicalSort(services map[string]*ServiceSpec, deps map[string][]Depende
 	}
 
 	var order []string
-
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
@@ -85,151 +96,141 @@ func TopologicalSort(services map[string]*ServiceSpec, deps map[string][]Depende
 	return order, nil
 }
 
-func (a *AppController) reconcileApp(ctx context.Context,app *AppGroup,) error {
-	// Resolve dependency order
-	order, err := TopologicalSort(app.Services, app.Dependencies)
-	if err != nil {
+func (a *AppController) ReconcileApp(ctx context.Context, app *AppGroup) error {
+	_ = ctx
+	if app == nil {
+		return fmt.Errorf("app cannot be nil")
+	}
+
+	if len(app.Services) == 0 {
+		return nil
+	}
+
+	if _, err := TopologicalSort(app.Services, app.Dependencies); err != nil {
 		return fmt.Errorf("dependency resolution failed for app %s: %w", app.Name, err)
 	}
 
-	// Reconcile each service in dependency order
-	for _, serviceName := range order {
-
-		spec, exists := app.Services[serviceName]
-		if !exists {
-			return fmt.Errorf("service %s not found in app %s", serviceName, app.Name)
-		}
-
-		//  Call service-level reconciliation
-		if err := a.reconcileService(ctx, app, spec); err != nil {
-			return fmt.Errorf("failed to reconcile service %s in app %s: %w",serviceName,app.Name,err,)
-		}
-	}
-
 	return nil
 }
 
-//converting service to tasks
-func (a *AppController) reconcileService(ctx context.Context,app *AppGroup,spec ServiceSpec,) error {
-	existingTasks, err := a.store.ListTasks(ctx, app.Name, spec.Name)
+func (a *AppController) ReconcileAll(ctx context.Context) error {
+	if a == nil || a.store == nil {
+		return nil
+	}
+
+	apps, err := a.store.ListApp(ctx)
 	if err != nil {
 		return err
 	}
-	current := len(existingTasks)
-	desired := spec.Replicas
-	// SCALE UP
-	if current < desired {
-		toCreate := desired - current
-		for i := 0; i < toCreate; i++ {
-			t := &task.Task{
-				ID:          uuid.New(),
-				AppName:     app.Name,
-				ServiceName: spec.Name,
-				CPU:         spec.CPU,
-				Memory:      spec.Memory,
-				Disk:        spec.Disk,
-				State:       task.Pending,
-			}
 
-			if err := a.store.CreateTask(ctx, t, ""); err != nil {
-				return err
-			}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		if err := a.ReconcileApp(ctx, app); err != nil {
+			return err
 		}
 	}
-
-	// SCALE DOWN
-	// if current > desired {
-	// 	toDelete := current - desired
-
-	// 	sort.Slice(existingTasks, func(i, j int) bool {
-	// 		return existingTasks[i].State < existingTasks[j].State
-	// 	})
-
-	// 	for i := 0; i < toDelete; i++ {
-	// 		t := existingTasks[i]
-	// 		t.State = task.Completed
-	// 		if err := a.store.UpdateTask(ctx, &t); err != nil {
-	// 			return err
-	// 		}
-	// 	}
-	// }
 
 	return nil
 }
 
-func (a *AppController) CreateApp(ctx context.Context,app *AppGroup,) error {
-	// Basic validation
+func (a *AppController) CreateApp(ctx context.Context, app *AppGroup) error {
+	if a == nil || a.store == nil {
+		return fmt.Errorf("app store is not configured")
+	}
+	if app == nil {
+		return fmt.Errorf("app cannot be nil")
+	}
 	if app.Name == "" {
 		return fmt.Errorf("app name cannot be empty")
 	}
 	if len(app.Services) == 0 {
 		return fmt.Errorf("at least one service required")
 	}
-	//Validate dependency references
+	if app.Dependencies == nil {
+		app.Dependencies = map[string][]Dependency{}
+	}
+
 	for from, deps := range app.Dependencies {
 		if _, ok := app.Services[from]; !ok {
 			return fmt.Errorf("dependency source service %s not found", from)
 		}
-
 		for _, dep := range deps {
 			if _, ok := app.Services[dep.TargetService]; !ok {
 				return fmt.Errorf("dependency target service %s not found", dep.TargetService)
 			}
 		}
 	}
-	//  Detect cycles using Topological Sort
-	order, err := TopologicalSort(app.Services, app.Dependencies)
-	if err != nil {
-		return fmt.Errorf("invalid dependency graph: %w", err)
-	}
-	// Initialize metadata
-	app.Version = 1
-	app.Status = AppActive
-	// Store full desired state
-	if err := a.store.SaveApp(ctx, app); err != nil {
+
+	if err := a.ReconcileApp(ctx, app); err != nil {
 		return err
 	}
-	// Reconcile → create tasks in topo order
-	if err := a.reconcileApp(ctx, app, order); err != nil {
-		return err
+
+	if app.Version == 0 {
+		app.Version = 1
 	}
-	return nil
+	if app.Status == "" {
+		app.Status = AppActive
+	}
+
+	return a.store.SaveApp(ctx, app)
 }
 
-func(a *AppController) AddDependency(ctx context.Context,appName,from,to string,weight int) error{
-	app,err:=a.store.GetApp(ctx,appName)
-	if err!=nil{
-		return err
+func (a *AppController) AddDependency(ctx context.Context, appName, from, to string, weight int) error {
+	if a == nil || a.store == nil {
+		return fmt.Errorf("app store is not configured")
 	}
-	if app.Dependencies[from]==nil{
-		app.Dependencies[from]=make(map[string]int);
-	}
-	app.Dependencies[from][to]=weight;
-	app.Version++;
-	return a.store.SaveApp(ctx,app);
-}
 
-func (a *AppController) AddService(ctx context.Context,appName string,serviceName string,replicas int,) error {
 	app, err := a.store.GetApp(ctx, appName)
 	if err != nil {
 		return err
 	}
-	app.Services[serviceName] = &Service{
-		Name:     serviceName,
-		Replicas: replicas,
+
+	if app.Dependencies == nil {
+		app.Dependencies = map[string][]Dependency{}
 	}
+
+	deps := app.Dependencies[from]
+	updated := false
+	for idx := range deps {
+		if deps[idx].TargetService == to {
+			deps[idx].MaxNetworkCost = weight
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		deps = append(deps, Dependency{TargetService: to, MaxNetworkCost: weight})
+	}
+	app.Dependencies[from] = deps
+	app.Version++
+
 	return a.store.SaveApp(ctx, app)
 }
 
-//Removing a service
-func (a *AppController) RemoveService(ctx context.Context,appName string,serviceName string,) error {
-	return a.store.DeleteService(ctx, appName, serviceName)
+func (a *AppController) AddService(ctx context.Context, appName string, serviceName string, replicas int) error {
+	if a == nil || a.store == nil {
+		return fmt.Errorf("app store is not configured")
+	}
+
+	app, err := a.store.GetApp(ctx, appName)
+	if err != nil {
+		return err
+	}
+
+	if app.Services == nil {
+		app.Services = map[string]*ServiceSpec{}
+	}
+	app.Services[serviceName] = &ServiceSpec{Name: serviceName, Replicas: replicas}
+	app.Version++
+
+	return a.store.SaveApp(ctx, app)
 }
 
-//Deleting application
-// func (a *AppController) DeleteApp(
-// 	ctx context.Context,
-// 	appName string,
-// ) error {
-// 	return a.store.DeleteApp(ctx, appName)
-// }
+func (a *AppController) RemoveService(ctx context.Context, appName string, serviceName string) error {
+	if a == nil || a.store == nil {
+		return fmt.Errorf("app store is not configured")
+	}
+	return a.store.DeleteService(ctx, appName, serviceName)
+}
