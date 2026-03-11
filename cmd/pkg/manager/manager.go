@@ -16,7 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	workerpkg "orchestrator/worker"
 	"github.com/docker/go-connections/nat"
 	"github.com/golang-collections/collections/queue"
 	"github.com/google/uuid"
@@ -29,11 +29,17 @@ type ManagerRole string
 
 const heartbeatStaleAfter = 30 * time.Second
 const defaultLeaderTTL = 15 * time.Second
+const statsStaleAfter = 5*time.Second
 
 const (
 	ManagerRoleLeader   ManagerRole = "leader"
 	ManagerRoleFollower ManagerRole = "follower"
 )
+
+type CachedStats struct {
+	Stats workerpkg.Stats
+	UpdatedAt time.Time
+}
 
 type Manager struct {
 	ID             string
@@ -49,13 +55,16 @@ type Manager struct {
 	WorkerClient   WorkerCommunicator
 	etcdSession    *concurrency.Session
 	AdvertiseAddr  string
-	initialWorkers []string
+	initialWorkers []store.Worker
 	Pending        queue.Queue
-	AppController  controlPlane.AppController
+	statsMu        sync.RWMutex
+	stats          map[string]CachedStats
+	AppController  *control.AppController
+	NetworkController *control.NetworkController
 }
 
 type Config struct {
-	Workers       []string
+	Workers       []store.Worker
 	ID            string
 	SchedulerType string
 	Store         store.Store
@@ -76,20 +85,41 @@ type managerInfo struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func (m *Manager) reconcileAllApps(ctx context.Context) {
+func (m *Manager) GetOrUpdateStats(ctx context.Context, worker string) (workerpkg.Stats, error) {
+	m.statsMu.RLock()
+	cached, ok := m.stats[worker]
+	m.statsMu.RUnlock()
+	if ok && time.Since(cached.UpdatedAt) < statsStaleAfter {
+		return cached.Stats, nil
+	}
+	currStats, err := m.WorkerClient.GetStats(worker)
+	if err != nil {
+		return workerpkg.Stats{}, err
+	}
+	m.statsMu.Lock()
+	m.stats[worker] = CachedStats{
+		Stats:     currStats,
+		UpdatedAt: time.Now(),
+	}
+	m.statsMu.Unlock()
+	return currStats, nil
+}
 
-	apps, err := m.Store.ListApps(ctx)
+func (m *Manager) reconcileAllApps(ctx context.Context) error {
+
+	apps, err := m.Store.ListApp(ctx)
 	if err != nil {
 		log.Println("Failed to list apps:", err)
-		return
+		return err
 	}
 
 	for _, app := range apps {
-		err := m.AppController.reconcileApp(ctx, app)
+		err := m.AppController.ReconcileApp(ctx, app)
 		if err != nil {
 			log.Println("Reconcile failed for app:", app.Name)
 		}
 	}
+	return nil
 }
 
 func (m *Manager) CurrentRole() ManagerRole {
@@ -116,16 +146,67 @@ func (m *Manager) runAppController(ctx context.Context){
 	}
 }
 
-func (m *Manager) onBecameLeader(ctx context.Context) {
-	wasLeader := m.isLeader()
-	m.setRole(ManagerRoleLeader)
-	if !wasLeader {
-		log.Printf("Manager %s: became leader", m.ID)
-		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		m.registerWorkers(c, m.initialWorkers)
-		cancel()
-		go m.runAppController(leaderCtx)
-	}
+func (m *Manager) measureAllLinks(workers []store.Worker) {
+    for i := 0; i < len(workers); i++ {
+        for j := i + 1; j < len(workers); j++ {
+            src := workers[i]
+            dst := workers[j]
+            latency := m.NetworkController.MeasureLatency(dst.Address)
+            bandwidth := m.NetworkController.MeasureBandwidth(src.Address,dst.Address)
+            m.NetworkController.UpdateLink(src.ID,dst.ID,latency,bandwidth,)
+        }
+    }
+}
+
+func (m *Manager) initializeNetworkGraph(ctx context.Context) {
+
+    workers, err := m.activeWorkers(ctx)
+    if err != nil {
+        return
+    }
+
+    nodeIDs := []string{}
+
+    for _, w := range workers {
+        nodeIDs = append(nodeIDs, w.ID)
+    }
+
+    // create default edges
+    m.NetworkController.EnsureDefaultLinks(nodeIDs)
+
+    // measure real metrics
+    m.measureAllLinks(workers)
+}
+
+func (m *Manager) networkMonitorLoop(ctx context.Context) {
+    ticker := time.NewTicker(30 * time.Second)
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            workers, err := m.activeWorkers(ctx)
+            if err != nil {
+                continue
+            }
+            m.measureAllLinks(workers)
+        }
+    }
+}
+
+func (m *Manager) onBecameLeader(parentCtx context.Context) {
+    wasLeader := m.isLeader()
+    m.setRole(ManagerRoleLeader)
+    if !wasLeader {
+        log.Printf("Manager %s: became leader", m.ID)
+        c, cancelRegister := context.WithTimeout(parentCtx, 5*time.Second)
+        m.registerWorkers(c, m.initialWorkers)
+        cancelRegister()
+        go m.runAppController(parentCtx)
+        m.NetworkController = control.NewNetworkController()
+        go m.initializeNetworkGraph(parentCtx)
+        go m.networkMonitorLoop(parentCtx)
+    }
 }
 
 func defaultManagerID() string {
@@ -167,7 +248,7 @@ func NewWithConfig(cfg Config) *Manager {
 		wc = NewHTTPWorkerClient(nil)
 	}
 
-	initialWorkers := append([]string(nil), cfg.Workers...)
+	initialWorkers := append([]store.Worker{}, cfg.Workers...)
 
 	m := &Manager{
 		ID:             id,
@@ -178,7 +259,12 @@ func NewWithConfig(cfg Config) *Manager {
 		AdvertiseAddr:  advertiseAddr,
 		initialWorkers: initialWorkers,
 		electionStop:   make(chan struct{}),
+		stats:          make(map[string]CachedStats),
 	}
+
+	if etcdStore, ok := cfg.Store.(*store.Client); ok {
+        m.AppController = &control.AppController{Store: *etcdStore}
+    }
 
 	if etcdStore, ok := cfg.Store.(*store.Client); ok {
 		m.etcdStore = etcdStore
@@ -281,7 +367,7 @@ func (m *Manager) watchPendingTasks(ctx context.Context) {
 					continue
 				}
 				key := string(ev.Kv.Key)
-				if !strings.HasSuffix(key, "/status") {
+				if !strings.HasSuffix(key, "/state") {
 					continue
 				}
 				var state task.State
@@ -433,7 +519,7 @@ func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
 		Timestamp: time.Now().UTC(),
 		Task:      t,
 	}
-	_, errResp, err := m.WorkerClient.StartTask(worker.Address, te)
+	ck, errResp, err := m.WorkerClient.StartTask(worker.Address, te)
 	if err != nil {
 		log.Printf("Manager %s: dispatch to worker %s for task %s failed: %v", m.ID, worker.ID, t.ID, err)
 		m.resetTaskToPending(t)
@@ -445,6 +531,8 @@ func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
 		m.resetTaskToPending(t)
 		return
 	}
+	fmt.Printf("task is %+v\n",ck)
+	log.Printf("Successfully sent task \n")
 
 	// Mark task as running after the worker acknowledged receipt.
 	t.State = task.Running
@@ -494,6 +582,7 @@ func (m *Manager) activeWorkers(ctx context.Context) ([]store.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("Workers are %+v\n",workers)
 	cutoff := time.Now().UTC().Add(-heartbeatStaleAfter)
 	live := make([]store.Worker, 0, len(workers))
 	for _, w := range workers {
@@ -600,6 +689,32 @@ func (m *Manager) tryAcquireLeadership(session *concurrency.Session) bool {
 	return false
 }
 
+func (m *Manager) GetPeerNodes(ctx context.Context,t *task.Task,) ([]string, error) {
+	app, err := m.AppController.Store.GetApp(ctx, t.AppName)
+	if err != nil {
+		return nil, err
+	}
+	deps := app.Dependencies[t.ServiceName]
+	
+	peerSet := make(map[string]struct{})
+	for _, dep := range deps {
+		tasks, err := m.AppController.Store.ListTasksByService(ctx,t.AppName,dep.TargetService)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range tasks {
+			if task.WorkerID != "" {
+				peerSet[task.WorkerID] = struct{}{}
+			}
+		}
+	}
+	peers := []string{}
+	for nodeID := range peerSet {
+		peers = append(peers, nodeID)
+	}
+	return peers, nil
+}
+
 func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker, error) {
 	if m.Store == nil {
 		return nil, errors.New("store not configured ")
@@ -612,7 +727,11 @@ func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker,
 	nodes := make([]*node.Node, 0, len(workers))
 	for _, w := range workers {
 		workerMap[w.ID] = w
-		n := node.NewNode(w.ID, w.Address, "worker")
+		stat,err:=m.GetOrUpdateStats(ctx,w.Address)
+		if err!=nil{
+			return nil,err
+		}
+		n := node.NewNode(w.ID, w.Address, "worker",&stat)
 		nodes = append(nodes, n)
 	}
 	//now select candidates
@@ -620,8 +739,20 @@ func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker,
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("There is no available candidate that match resource requirement for task\n")
 	}
-	scores := m.scheduler.Score(&t, nodes)
-	selected_candidates := m.scheduler.Pick(scores, candidates)
+
+	//get the dependency nodes for that task which includes replicas also
+	peerIDs,err:=m.GetPeerNodes(ctx,&t)
+	if err!=nil{
+		return nil,err
+	}
+	networkScores:=make(map[string]float64)
+	for _,n:=range candidates{
+		basescore:=m.scheduler.BaseScore(&t,n)
+		networkScore:=m.NetworkController.ScoreNode(n.ID,peerIDs)
+		finalScore:=control.CombineScores(basescore,networkScore)
+		networkScores[n.ID]=finalScore
+	}
+	selected_candidates := m.scheduler.Pick(networkScores, candidates)
 	if selected_candidates == nil {
 		return nil, fmt.Errorf("Scheduler failed to pick a worker ")
 	}
@@ -825,7 +956,7 @@ func (m *Manager) LeaderAddress(ctx context.Context) (string, error) {
 	return managerInfo.Address, nil
 }
 
-func (m *Manager) registerWorkers(ctx context.Context, worker []string) {
+func (m *Manager) registerWorkers(ctx context.Context, worker []store.Worker) {
 	if m.Store == nil {
 		log.Printf("Etcd not configured \n")
 		return
@@ -835,7 +966,7 @@ func (m *Manager) registerWorkers(ctx context.Context, worker []string) {
 		return
 	}
 	for _, w := range worker {
-		meta := store.Worker{ID: w, Address: w, Heartbeat: time.Now().UTC()}
+		meta := store.Worker{ID: w.ID, Address: w.Address, Heartbeat: time.Now().UTC()}
 		if err := m.Store.RegisterWorker(ctx, meta); err != nil {
 			log.Printf("Error registering worker %s: %v", w, err)
 		}

@@ -1,15 +1,22 @@
 package node
 
-type Node struct {
-ID      string
-Address string
-Role    string
-}
+import (
+    workerpkg "orchestrator/worker"
+)
 
-func NewNode(id, address, role string) *Node {
-return &Node{
-ID:      id,
-Address: address,
-Role:    role,
+type Node struct {
+   Name string
+   ID string
+   Address string
+   Role string
+   TaskCount int
+   Stats *workerpkg.Stats
 }
+func NewNode(id, address, role string,stat *workerpkg.Stats) *Node {
+	return &Node{
+		ID:      id,
+        Address: address,
+        Role:    role,
+        Stats:   stat,
+    }
 }

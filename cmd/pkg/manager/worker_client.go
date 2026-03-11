@@ -13,6 +13,7 @@ type WorkerCommunicator interface {
 	FetchTasks(worker string) ([]*task.Task, error)
 	StartTask(worker string, event task.TaskEvent) (*task.Task, *workerpkg.ErrResponse, error)
 	StopTask(worker string, taskID string) error
+	GetStats(worker string) (workerpkg.Stats,error)
 }
 
 type HTTPWorkerClient struct {
@@ -24,6 +25,25 @@ func NewHTTPWorkerClient(client *http.Client) *HTTPWorkerClient {
 		client = &http.Client{}
 	}
 	return &HTTPWorkerClient{HTTPClient: client}
+}
+
+func(h *HTTPWorkerClient) GetStats(worker string) (workerpkg.Stats,error){
+	url:=fmt.Sprintf("http://%s/stats",worker)
+	resp,err:=h.HTTPClient.Get(url)
+	if err!=nil{
+		return workerpkg.Stats{},err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode!=http.StatusOK{
+		return workerpkg.Stats{},fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, url)
+	}
+	decoder:=json.NewDecoder(resp.Body)
+	var stats workerpkg.Stats
+	if err:=decoder.Decode(&stats);err!=nil{
+		return workerpkg.Stats{},err
+	}
+	return stats,nil
 }
 
 func (h *HTTPWorkerClient) FetchTasks(worker string) ([]*task.Task, error) {
@@ -50,6 +70,7 @@ func (h *HTTPWorkerClient) FetchTasks(worker string) ([]*task.Task, error) {
 func (h *HTTPWorkerClient) StartTask(worker string, event task.TaskEvent) (*task.Task, *workerpkg.ErrResponse, error) {
 	url := fmt.Sprintf("http://%s/tasks", worker)
 	payload, err := json.Marshal(event)
+	fmt.Printf("Task event is %+v\n",event)
 	if err != nil {
 		return nil, nil, err
 	}

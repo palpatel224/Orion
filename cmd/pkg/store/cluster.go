@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"orchestrator/task"
+	"orchestrator/types"
 	"strings"
 	"time"
 
@@ -79,10 +80,56 @@ func (c *Client) ManagerKey(id string) string {
 }
 
 func (c *Client) workerKey(id string) string {
-	return fmt.Sprintf("/worker/%s", id)
+	return fmt.Sprintf("/workers/%s", id)
 }
 
-func(c *Client) GetApp(ctx context.Context,name string)(*controlPlane.AppGroup,error){
+// func (c *Client) UpdateLink(ctx context.Context,srcID string,dstID string,metric LinkMetrics,) error {
+// 	key := fmt.Sprintf("/network/links/%s/%s", srcID, dstID)
+// 	data, err := json.Marshal(metric)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	_, err = s.Cli.Put(ctx, key, string(data))
+// 	return err
+// }
+
+// func (c *Client) GetLink(ctx context.Context,srcID string,dstID string,) (LinkMetrics, error) {
+// 	key := fmt.Sprintf("/network/links/%s/%s", srcID, dstID)
+// 	resp, err := c.Cli.Get(ctx, key)
+// 	if err != nil {
+// 		return LinkMetrics{}, err
+// 	}
+// 	if len(resp.Kvs) == 0 {
+// 		return LinkMetrics{}, ErrNotFound
+// 	}
+// 	var metric LinkMetrics
+// 	err = json.Unmarshal(resp.Kvs[0].Value, &metric)
+// 	return metric, err
+// }
+
+// func (c *Client) ListLinks(ctx context.Context) ([]LinkRecord, error) {
+// 	resp, err := s.Cli.Get(ctx, "/network/links/", clientv3.WithPrefix())
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	var records []LinkRecord
+// 	for _, kv := range resp.Kvs {
+// 		parts := strings.Split(string(kv.Key), "/")
+// 		src := parts[3]
+// 		dst := parts[4]
+// 		var metric LinkMetrics
+// 		json.Unmarshal(kv.Value, &metric)
+
+// 		records = append(records, LinkRecord{
+// 			SrcID:  src,
+// 			DstID:  dst,
+// 			Metric: metric,
+// 		})
+// 	}
+// 	return records, nil
+// }
+
+func(c *Client) GetApp(ctx context.Context,name string)(*types.AppGroup,error){
 	key:=c.servicePrefix(name)
 	resp,err:=c.Cli.Get(ctx,key)
 	if err!=nil{
@@ -91,22 +138,22 @@ func(c *Client) GetApp(ctx context.Context,name string)(*controlPlane.AppGroup,e
 	if len(resp.Kvs)==0{
 		return nil,fmt.Errorf("app not found")
 	}
-	var app controlPlane.AppGroup
+	var app types.AppGroup
 	if err:=json.Unmarshal(resp.Kvs[0].Value,&app);err!=nil{
 		return nil,err
 	}
 	return &app,nil
 }
 
-func(c *Client) ListApp(ctx context.Context) ([]*control.controlPlane.AppGroup,error){
+func(c *Client) ListApp(ctx context.Context) ([]*types.AppGroup,error){
 	prefix:=c.appPrefix()
 	resp,err:=c.Cli.Get(ctx,prefix,clientv3.WithPrefix())
 	if err!=nil{
 		return nil,err
 	}
-	var apps []*controlPlane.AppGroup
+	var apps []*types.AppGroup
 	for _,kv:=range resp.Kvs{
-		var app controlPlane.AppGroup
+		var app types.AppGroup
 		if err:=json.Unmarshal(kv.Value,&app);err!=nil{
 			return nil,err
 		}
@@ -115,7 +162,7 @@ func(c *Client) ListApp(ctx context.Context) ([]*control.controlPlane.AppGroup,e
 	return apps,nil
 }
 
-func(c *Client) SaveApp(ctx context.Context,app *controlPlane.AppGroup)error{
+func(c *Client) SaveApp(ctx context.Context,app *types.AppGroup)error{
 	key:=c.servicePrefix(app.Name)
 	data,err:=json.Marshal(app)
 	if err!=nil{
@@ -126,7 +173,7 @@ func(c *Client) SaveApp(ctx context.Context,app *controlPlane.AppGroup)error{
 		return err
 	}
 	if len(resp.Kvs)==0{
-		_,err=c.Cli.Put(ctx,string(data))
+		_,err=c.Cli.Put(ctx,key,string(data))
 		return err
 	}
 	//if exists then update
@@ -156,17 +203,17 @@ func (c *Client) DeleteService(ctx context.Context, appName string, serviceName 
     // Save the revision for the transaction check
     rev := resp.Kvs[0].ModRevision
 
-    var app controlPlane.AppGroup
+    var app types.AppGroup
     if err := json.Unmarshal(resp.Kvs[0].Value, &app); err != nil {
         return err
     }
 
-    if _, exists := app.Services[serviceName]; !exists {
+    if _, exists := app.Service[serviceName]; !exists {
         return fmt.Errorf("service not found")
     }
 
     // 2. Modify
-    delete(app.Services, serviceName)
+    delete(app.Service, serviceName)
     updated, err := json.Marshal(app)
     if err != nil {
         return err
@@ -329,6 +376,66 @@ func (c *Client) UpdateTaskState(ctx context.Context, t *task.Task, workerID str
 	return err
 }
 
+// List Tasks where appName and serviceName is given
+func (c *Client) ListTasksByService(ctx context.Context,appName string,serviceName string,) ([]TaskRecord, error) {
+	key := c.taskPrefix()
+	resp, err := c.Cli.Get(ctx, key, clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+	type taskMeta struct {
+		task   *task.Task
+		state  *task.State
+		worker string
+	}
+	records := make(map[string]*taskMeta)
+	for _, kv := range resp.Kvs {
+		k := string(kv.Key)
+		segments := strings.Split(k, "/")
+
+		if len(segments) < 3 {
+			continue
+		}
+		taskID := segments[2]
+		if _, ok := records[taskID]; !ok {
+			records[taskID] = &taskMeta{}
+		}
+		meta := records[taskID]
+		if strings.HasSuffix(k, "/worker") {
+			meta.worker = string(kv.Value)
+			continue
+		}
+		if strings.HasSuffix(k, "/state") {
+			var s task.State
+			json.Unmarshal(kv.Value, &s)
+			meta.state = &s
+			continue
+		}
+
+		var t task.Task
+		if err := json.Unmarshal(kv.Value, &t); err != nil {
+			continue
+		}
+
+		if t.AppName == appName && t.ServiceName == serviceName {
+			meta.task = &t
+		}
+	}
+
+	var result []TaskRecord
+
+	for _, m := range records {
+		if m.task != nil {
+			result = append(result, TaskRecord{
+				Task:   m.task,
+				WorkerID: m.worker,
+			})
+		}
+	}
+
+	return result, nil
+}
+
 // ListTasks returns all tasks and their worker assignments.
 func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 	pre := fmt.Sprintf("/tasks/")
@@ -398,7 +505,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]TaskRecord, error) {
 }
 
 func (c *Client) ListWorkers(ctx context.Context) ([]Worker, error) {
-	key := fmt.Sprintf("/worker/")
+	key := fmt.Sprintf("/workers/")
 	resp, err := c.Cli.Get(ctx, key, clientv3.WithPrefix())
 	if err != nil {
 		return nil, err
@@ -454,23 +561,23 @@ func (c *Client) ListWorkers(ctx context.Context) ([]Worker, error) {
 }
 
 func (c *Client) UpdateWorkerHeartbeat(ctx context.Context, workerID string, heartbeat time.Time) error {
-	hbBytes, err := json.Marshal(heartbeat)
-	if err != nil {
-		return err
-	}
-	workerKey := c.workerKey(workerID)
-	resp, e := c.Cli.Get(ctx, workerKey)
-	if e != nil {
-		return e
-	}
-	if resp.Count == 0 {
-		return ErrNotFound
-	}
-	_, err = c.Cli.Txn(ctx).Then(
-		clientv3.OpPut(c.workerHeartbeatKey(workerID), string(hbBytes)),
-	).Commit()
-	return err
+    hbBytes, err := json.Marshal(heartbeat)
+    if err != nil {
+        return err
+    }
+    // check worker exists
+    resp, err := c.Cli.Get(ctx, c.workerKey(workerID))
+    if err != nil {
+        return err
+    }
+    if resp.Count == 0 {
+        return ErrNotFound
+    }
+    // update heartbeat
+    _, err = c.Cli.Put(ctx, c.workerHeartbeatKey(workerID), string(hbBytes))
+    return err
 }
+
 
 func (c *Client) AssignPendingTasks(ctx context.Context, t *task.Task, workerID string) (bool, error) {
 	if t == nil {
@@ -518,12 +625,10 @@ func (c *Client) RegisterWorker(ctx context.Context, worker Worker) error {
 	if err != nil {
 		return err
 	}
-
 	heartbeatBytes, err := json.Marshal(worker.Heartbeat)
 	if err != nil {
 		return err
 	}
-
 	_, err = c.Cli.Txn(ctx).Then(
 		clientv3.OpPut(c.workerKey(worker.ID), string(workerBytes)),
 		clientv3.OpPut(c.workerHeartbeatKey(worker.ID), string(heartbeatBytes)),

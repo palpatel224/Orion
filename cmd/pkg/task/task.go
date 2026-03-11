@@ -37,6 +37,7 @@ type Task struct {
 	Name          string
 	State         State
 	Image         string
+	CPU           int64
 	Memory        int64
 	Disk          int64
 	ExposedPorts  nat.PortSet
@@ -46,6 +47,8 @@ type Task struct {
 	FinishTime    time.Time
 	HealthCheck   string
 	RestartCount  int
+	AppName       string
+	ServiceName   string
 }
 
 func (s State) MarshalJSON() ([]byte, error) {

@@ -25,6 +25,9 @@ func (a *Api) Start(){
 
 func (a *Api) initRouter(){
 	a.Router = chi.NewRouter()
+	a.Router.Get("/health", a.HealthHandler)
+	a.Router.Post("/bandwidth-receive",a.BandwidthRecieverHandler)
+	a.Router.Post("/measure-bandwidth",a.MeasureBandwidthHandler)
 	a.Router.Route("/tasks",func(r chi.Router){
 		r.Post("/",a.StartTaskHandler)
 		r.Get("/",a.GetTasksHandler)

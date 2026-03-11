@@ -42,7 +42,7 @@ func RegisterWithManager(ctx context.Context, managerAddress string, meta store.
 func sendHeartbeat(ctx context.Context, managerAddress, workerID string) error {
 	msg:=fmt.Sprintf("http://%s/workers/%s/heartbeat",managerAddress,workerID)
 	fmt.Printf("Sending heartbeat at url %s \n",msg)
-    req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("http://%s/workers/%s/heartbeat", managerAddress, workerID), nil)
+    req, err := http.NewRequestWithContext(ctx, http.MethodPut, msg, nil)
     if err != nil {
         return err
     }
@@ -62,7 +62,7 @@ func sendHeartbeat(ctx context.Context, managerAddress, workerID string) error {
 
 func StartHeartbeat(ctx context.Context, managerAddress, workerID string, interval time.Duration) {
     if interval <= 0 {
-        interval = 10 * time.Second
+        interval = 5 * time.Second
     }
 	
     ticker := time.NewTicker(interval)

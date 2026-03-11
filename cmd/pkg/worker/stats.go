@@ -17,8 +17,8 @@ func(s *Stats) MemTotalKb()uint64{
 	return s.MemStats.MemTotal
 }
 
-func(s *Stats) MemAvailableKb() uint64{
-	return s.MemStats.MemAvailable
+func(s *Stats) MemAvailableKb() float64{
+	return float64(s.MemStats.MemAvailable)
 }
 
 func(s *Stats) MemUsedKb() uint64{
@@ -29,16 +29,21 @@ func(s *Stats) MemUsedPercent() uint64{
 	return s.MemStats.MemAvailable/s.MemStats.MemTotal
 }
 
-func(s *Stats) DiskTotal() uint64{
-	return s.DiskStats.All
+func(s *Stats) DiskTotal() float64{
+	return float64(s.DiskStats.All)
 }
 
-func(s *Stats) DiskFree() uint64{
-	return s.DiskStats.Free
+func(s *Stats) DiskFree() float64{
+	return float64(s.DiskStats.Free)
 }
 
-func(s *Stats) DiskUsed() uint64{
-	return s.DiskStats.Used
+func(s *Stats) DiskUsed() float64{
+	return float64(s.DiskStats.Used)
+}
+
+func(s *Stats) CpuAvailable() float64{
+	idle:=s.CpuStats.Idle + s.CpuStats.IOWait
+	return float64(idle)
 }
 
 func(s *Stats) CpuUsage() float64{
@@ -51,14 +56,22 @@ func(s *Stats) CpuUsage() float64{
 	return (float64(total)-float64(idle))/float64(total)
 }
 
-func GetStats() *Stats{
-	return &Stats{
-		MemStats:GetMemoryInfo(),
-		DiskStats:GetDiskInfo(),
-		CpuStats:GetCpuStats(),
-		LoadStats:GetLoadAvg(),
-	}
+func GetStats() *Stats {
+    mem := GetMemoryInfo()
+    disk := GetDiskInfo()
+    cpu := GetCpuStats()
+    load := GetLoadAvg()
+
+    stats := &Stats{
+        MemStats:  mem,
+        DiskStats: disk,
+        CpuStats:  cpu,
+        LoadStats: load,
+    }
+
+    return stats
 }
+
 
 func GetMemoryInfo() *linux.MemInfo{
 	memStats,err:=linux.ReadMemInfo("/proc/meminfo")

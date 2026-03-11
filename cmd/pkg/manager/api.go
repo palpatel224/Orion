@@ -36,6 +36,9 @@ func (a *Api) initRouter() {
 			r.Delete("/", a.StopTaskHandler)
 		})
 	})
+	a.Router.Route("/app",func(r chi.Router){
+		r.Post("/",a.CreateAppHandler)
+	})
 	a.Router.Route("/workers",func(r chi.Router){
 		r.Post("/",a.RegisterWorkerHandler)
 		r.Route("/{workerID}",func(r chi.Router){
