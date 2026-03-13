@@ -238,10 +238,10 @@ func NewWithConfig(cfg Config) *Manager {
 	switch cfg.SchedulerType {
 	case "roundrobin":
 		s = &scheduler.RoundRobin{Name: "roundrobin"}
-	// case "epvm":
-	// 	s = &scheduler.RoundRobin{Name: "rounfrobin"}
+	case "EPVM":
+		s = &scheduler.EPVM{Name: "EPVM"}
 	default:
-		s = &scheduler.RoundRobin{Name: "roundrobin"}
+		s = &scheduler.EPVM{Name: "EPVM"}
 	}
 	wc := cfg.WorkerClient
 	if wc == nil {

@@ -11,12 +11,16 @@ type Scheduler interface {
     Pick(scores map[string]float64,candidates []*node.Node) *node.Node
 }
 
-type RoundRobin struct {
-    Name string
-    last int
+// type RoundRobin struct {
+//     Name string
+//     last int
+// }
+
+type EPVM struct{
+	Name string
 }
 
-func (s *RoundRobin) SelectCandidateNodes(t *task.Task,nodes []*node.Node,) []*node.Node {
+func (e *EPVM) SelectCandidateNodes(t *task.Task,nodes []*node.Node,) []*node.Node {
 	candidates := []*node.Node{}
 	for _, n := range nodes {
 		stats := n.Stats
@@ -42,47 +46,35 @@ func (s *RoundRobin) SelectCandidateNodes(t *task.Task,nodes []*node.Node,) []*n
 	return candidates
 }
 
-func (r *RoundRobin) BaseScore(t *task.Task, n *node.Node) float64 {
+func (e *EPVM) BaseScore(t *task.Task, n *node.Node) float64 {
 	stats := n.Stats
 	if stats == nil {
 		return 0
 	}
-	//MEMORY SCORE
+	// CPU SCORE
+	cpuUsage := stats.CpuUsage() // 0 to 1
+	cpuScore := 1 - cpuUsage
+	if cpuScore < 0 {
+		cpuScore = 0
+	}
+	// MEMORY SCORE
 	memTotal := float64(stats.MemStats.MemTotal)
 	memAvail := float64(stats.MemStats.MemAvailable)
-
 	memScore := memAvail / memTotal
 	if memScore > 1 {
 		memScore = 1
 	}
-
-	//DISK SCORE
+	// DISK SCORE
 	diskScore := stats.DiskFree() / stats.DiskTotal()
 	if diskScore > 1 {
 		diskScore = 1
 	}
-
-	//CPU SCORE
-	cpuScore := 1 - stats.CpuUsage()
-
-	if cpuScore < 0 {
-		cpuScore = 0
-	}
-	if cpuScore > 1 {
-		cpuScore = 1
-	}
-
-	//WEIGHTED BASE SCORE 
-	cpuWeight := 0.5
-	memWeight := 0.3
-	diskWeight := 0.2
-
-	baseScore := cpuWeight*cpuScore+memWeight*memScore +diskWeight*diskScore
-
+	// EPVM LOAD BALANCE SCORE
+	baseScore := (cpuScore + memScore + diskScore) / 3
 	return baseScore
 }
 
-func(r *RoundRobin) Pick(scores map[string]float64,candidates []*node.Node,) *node.Node {
+func(r *EPVM) Pick(scores map[string]float64,candidates []*node.Node,) *node.Node {
 	var best *node.Node
 	bestScore := -1.0
 	for _, n := range candidates {
