@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Api struct {
@@ -29,6 +30,8 @@ func (a *Api) HTTPClient() *http.Client{
 func (a *Api) initRouter() {
 	a.Router = chi.NewRouter()
 	a.Router.Get("/status",a.StatusHandler)
+	a.Router.Post("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		promhttp.Handler().ServeHTTP(w, r)})
 	a.Router.Route("/tasks", func(r chi.Router) {
 		r.Post("/", a.StartTaskHandler)
 		r.Get("/", a.GetTasksHandler)

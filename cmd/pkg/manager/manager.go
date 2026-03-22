@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"orchestrator/node"
+	"orchestrator/metrics"
 	"orchestrator/scheduler"
 	"orchestrator/controlPlane"
 	"orchestrator/store"
@@ -236,8 +237,8 @@ func NewWithConfig(cfg Config) *Manager {
 	}
 	var s scheduler.Scheduler
 	switch cfg.SchedulerType {
-	case "roundrobin":
-		s = &scheduler.RoundRobin{Name: "roundrobin"}
+	// case "roundrobin":
+	// 	s = &scheduler.RoundRobin{Name: "roundrobin"}
 	case "EPVM":
 		s = &scheduler.EPVM{Name: "EPVM"}
 	default:
@@ -483,12 +484,15 @@ func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID) {
 		return
 	}
 	workerctx, workerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	start:=time.Now()
 	worker, err := m.SelectWorker(workerctx, *resp)
 	workerCancel()
 	if err != nil {
 		log.Printf("Manager %s : no worker is selected for task %s : %v\n", m.ID, resp.ID, err)
 		return
 	}
+	latency := time.Since(start).Seconds()
+	metrics.NodeSelectionLatency.Observe(latency)
 	//Now update it in the etcd
 	assignctx, assignCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	succeeded, e := m.etcdStore.AssignPendingTasks(assignctx, resp, worker.ID)
@@ -503,6 +507,9 @@ func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID) {
 	}
 	resp.State = task.Scheduled
 	m.dispatchTaskToWorker(*resp, worker)
+	latency = time.Since(resp.StartTime).Seconds()
+    metrics.SchedulerLatency.Observe(latency)
+	//measures the time taken by the scheduler
 }
 
 func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
@@ -746,13 +753,18 @@ func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker,
 		return nil,err
 	}
 	networkScores:=make(map[string]float64)
+	baseScores:=make(map[string]float64)
 	for _,n:=range candidates{
 		basescore:=m.scheduler.BaseScore(&t,n)
 		networkScore:=m.NetworkController.ScoreNode(n.ID,peerIDs)
 		finalScore:=control.CombineScores(basescore,networkScore)
+		baseScores[n.ID]=basescore
 		networkScores[n.ID]=finalScore
 	}
-	selected_candidates := m.scheduler.Pick(networkScores, candidates)
+	//checking the performance based on EPVM
+	selected_candidates := m.scheduler.Pick(baseScores, candidates)
+	//checking the performance based on EPVM and Network scores
+	// selected_candidates := m.scheduler.Pick(networkScores, candidates)
 	if selected_candidates == nil {
 		return nil, fmt.Errorf("Scheduler failed to pick a worker ")
 	}
@@ -760,6 +772,7 @@ func (m *Manager) SelectWorker(ctx context.Context, t task.Task) (*store.Worker,
 	if !ok {
 		return nil, fmt.Errorf("Selected worker not found with ID %v\n", selected_candidates.ID)
 	}
+	metrics.NodeSelections.WithLabelValues(selectedWorker.ID).Inc()
 	return &selectedWorker, nil
 }
 
@@ -870,6 +883,7 @@ func (m *Manager) SendWork() {
 		m.Pending.Enqueue(te)
 		return
 	}
+	metrics.TasksScheduled.Inc()
 	//interact with the worker client to start the task on the selected worker
 	newTask, errResp, err := m.WorkerClient.StartTask(w.Address, te)
 	if err != nil {
@@ -1160,6 +1174,8 @@ func (m *Manager) RestartTask(t *task.Task) {
 	cancel()
 
 	m.dispatchTaskToWorker(*t, assignedWorker)
+	latency := time.Since(t.StartTime).Seconds()
+    metrics.SchedulerLatency.Observe(latency)
 }
 
 func (m *Manager) DoHealthChecks() {

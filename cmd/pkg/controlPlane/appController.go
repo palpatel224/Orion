@@ -6,6 +6,7 @@ import(
 	"orchestrator/types"
 	"github.com/google/uuid"
 	"fmt"
+	// "time"
 	"context"
 )
 
@@ -107,6 +108,7 @@ func (a *AppController) reconcileService(ctx context.Context,app *types.AppGroup
 				State:       task.Pending,
 				AppName:     app.Name,
 				ServiceName: spec.Name,
+				// StartTime:   time.Now(),
 			}
 
 			if err := a.Store.CreateTask(ctx, t, ""); err != nil {

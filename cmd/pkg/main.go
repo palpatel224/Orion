@@ -11,7 +11,7 @@ import (
 
 	"github.com/golang-collections/collections/queue"
 	"github.com/google/uuid"
-
+	"orchestrator/metrics"
 	"orchestrator/manager"
 	"orchestrator/store"
 	"orchestrator/task"
@@ -71,7 +71,7 @@ func startManagers(store store.Store) (*manager.Manager, []*manager.Manager) {
 	}
 
 	go mapi.Start()
-	// go leader.UpdateTasks()
+	go leader.UpdateTasks()
 	go leader.DoHealthChecks()
 
 	followers := []*manager.Manager{}
@@ -134,7 +134,7 @@ func submitApp() {
 				Name:     "frontend",
 				Image:    "nginx:latest",
 				CPU:      1,
-				Memory:   128*1024*1024,
+				Memory:   128,
 				Disk:     2,
 				Replicas: 1,
 			},
@@ -143,7 +143,7 @@ func submitApp() {
 				Name:     "cache",
 				Image:    "redis:latest",
 				CPU:      1,
-				Memory:   128*1024*1024,
+				Memory:   128,
 				Disk:     2,
 				Replicas: 1,
 			},
@@ -152,7 +152,7 @@ func submitApp() {
 				Name:     "worker",
 				Image:    "ubuntu:latest",
 				CPU:      1,
-				Memory:   128*1024*1024,
+				Memory:   128,
 				Disk:     2,
 				Replicas: 1,
 			},
@@ -193,7 +193,7 @@ func submitApp() {
 }
 
 func main() {
-
+	metrics.Init()
 	ctx := context.Background()
 
 	// 1 Start workers

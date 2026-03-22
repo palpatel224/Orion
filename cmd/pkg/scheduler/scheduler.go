@@ -11,10 +11,10 @@ type Scheduler interface {
     Pick(scores map[string]float64,candidates []*node.Node) *node.Node
 }
 
-// type RoundRobin struct {
-//     Name string
-//     last int
-// }
+type RoundRobin struct {
+    Name string
+    last int
+}
 
 type EPVM struct{
 	Name string

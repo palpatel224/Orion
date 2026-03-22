@@ -49,6 +49,7 @@ type Task struct {
 	RestartCount  int
 	AppName       string
 	ServiceName   string
+	Cmd           []string
 }
 
 func (s State) MarshalJSON() ([]byte, error) {
@@ -174,9 +175,9 @@ func (d *Docker) Run() DockerResult {
 	rp := container.RestartPolicy{
 		Name: container.RestartPolicyMode(d.Config.RestartPolicy),
 	}
-
+	memoryBytes:=d.Config.Memory*1024*1024
 	r := container.Resources{
-		Memory:   d.Config.Memory,
+		Memory:   memoryBytes,
 		NanoCPUs: int64(d.Config.Cpu * math.Pow(10, 9)),
 	}
 
