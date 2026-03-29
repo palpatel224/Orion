@@ -1,0 +1,14 @@
+apiVersion: orion/v1
+kind: Task
+metadata:
+  name: frontend
+spec:
+  image: nginx:latest
+  cpu: 1
+  memory: 128
+  disk: 2
+  restartPolicy: always
+  cmd:
+    - nginx
+    - -g
+    - daemon off;

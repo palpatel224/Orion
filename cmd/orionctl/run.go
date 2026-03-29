@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/aditip149209/Orion/pkg/cli"
@@ -17,37 +16,42 @@ var runCmd = &cobra.Command{
 	Short: "Submit a new task to the cluster",
 	Run: func(cmd *cobra.Command, args []string) {
 		if taskFile == "" {
-			fmt.Println("Error: please provide a task JSON file using -f")
+			fmt.Println("Error: please provide a task manifest file using -f")
 			os.Exit(1)
 		}
 
-		file, err := os.Open(taskFile)
+		payload, kind, err := parseSubmissionFile(taskFile)
 		if err != nil {
-			fmt.Printf("Error opening file: %v\n", err)
-			os.Exit(1)
-		}
-		defer file.Close()
-
-		data, err := io.ReadAll(file)
-		if err != nil {
-			fmt.Printf("Error reading file: %v\n", err)
+			fmt.Printf("Error parsing manifest: %v\n", err)
 			os.Exit(1)
 		}
 
 		client := cli.NewClient(managerAddr)
-		err = client.SubmitTask(data)
-		if err != nil {
-			fmt.Printf("Failed to submit task: %v\n", err)
+		switch kind {
+		case submissionKindTask:
+			err = client.SubmitTask(payload)
+			if err != nil {
+				fmt.Printf("Failed to submit task: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Task submitted successfully!")
+		case submissionKindApp:
+			err = client.SubmitApp(payload)
+			if err != nil {
+				fmt.Printf("Failed to submit app: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("App submitted successfully!")
+		default:
+			fmt.Printf("Error: unsupported manifest kind %q\n", kind)
 			os.Exit(1)
 		}
-
-		fmt.Println("Task submitted successfully!")
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(runCmd)
 	// Bind the -f flag to the taskFile variable
-	runCmd.Flags().StringVarP(&taskFile, "file", "f", "", "Path to task JSON file (required)")
+	runCmd.Flags().StringVarP(&taskFile, "file", "f", "", "Path to task manifest file (.json/.yaml/.yml) (required)")
 	runCmd.MarkFlagRequired("file")
 }

@@ -14,7 +14,9 @@
 
 ## Overview
 
-ORION is a production-grade container orchestration platform designed to address the critical gap in modern orchestrators: **network-aware scheduling**. Unlike traditional orchestrators that treat the network as an afterthought, ORION makes network topology, latency, and bandwidth first-class citizens in scheduling decisions.
+ORION is a production-grade container orchestration platform d# create pseudo-main from the most complete branch
+git checkout -b pseudo-main origin/network-controller
+git push -u origin pseudo-mainesigned to address the critical gap in modern orchestrators: **network-aware scheduling**. Unlike traditional orchestrators that treat the network as an afterthought, ORION makes network topology, latency, and bandwidth first-class citizens in scheduling decisions.
 
 Similar to K3s in its lightweight approach, ORION goes further by implementing Raft-based consensus for fault-tolerant state management and incorporating real-time network metrics into every scheduling decision. The result is a self-healing orchestrator that optimally places containers based on actual network conditions, not just CPU and memory.
 

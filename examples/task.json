@@ -1,0 +1,11 @@
+{
+  "Task": {
+    "Name": "frontend",
+    "Image": "nginx:latest",
+    "CPU": 1,
+    "Memory": 128,
+    "Disk": 2,
+    "RestartPolicy": "always",
+    "Cmd": ["nginx", "-g", "daemon off;"]
+  }
+}

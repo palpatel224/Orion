@@ -1,20 +1,26 @@
 package store
 
-import(
-	"time"
+import (
 	"context"
 	"errors"
 	"orchestrator/task"
 	"orchestrator/types"
+	"time"
+
 	"github.com/google/uuid"
 )
 
-var ErrNotFound=errors.New("Store : item not found")
+var ErrNotFound = errors.New("Store : item not found")
 
-type Worker struct{
-	ID string
-	Address string
-	Heartbeat time.Time
+type Worker struct {
+	ID              string
+	Address         string
+	Heartbeat       time.Time
+	CPUUsage        float64
+	MemoryAvailable uint64
+	MemoryTotal     uint64
+	DiskFree        uint64
+	DiskTotal       uint64
 }
 
 type Store interface {
@@ -25,14 +31,8 @@ type Store interface {
 	RegisterWorker(ctx context.Context, worker Worker) error
 	ListWorkers(ctx context.Context) ([]Worker, error)
 	UpdateWorkerHeartbeat(ctx context.Context, workerID string, heartbeat time.Time) error
-	//for applications
-	SaveApp(ctx context.Context,app *types.AppGroup)error
-	GetApp(ctx context.Context,name string)(*types.AppGroup,error)
-	ListApp(ctx context.Context)([]*types.AppGroup,error)
+	SaveApp(ctx context.Context, app *types.AppGroup) error
+	GetApp(ctx context.Context, name string) (*types.AppGroup, error)
+	ListApp(ctx context.Context) ([]*types.AppGroup, error)
 	DeleteService(ctx context.Context, appName string, serviceName string) error
-	ListTasksByService(ctx context.Context,appName string,serviceName string)([]TaskRecord,error)
-	// //for links
-	// UpdateLink(ctx context.Context,srcID string,dstID string,metric LinkMetrics) error
-	// GetLink(ctx context.Context,srcID string,dstID string) (LinkMetrics,error)
-	// ListLinks(ctx context.Context) ([]LinkRecord,error)
 }

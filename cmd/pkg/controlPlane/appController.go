@@ -1,17 +1,36 @@
 package control
 
-import(
+import (
+	"fmt"
 	"orchestrator/store"
 	"orchestrator/task"
 	"orchestrator/types"
+
 	"github.com/google/uuid"
-	"fmt"
+
 	// "time"
 	"context"
 )
 
-type AppController struct{
-	Store store.Client
+type AppController struct {
+	Store store.Store
+}
+
+func NewAppController(s store.Store) *AppController {
+	return &AppController{Store: s}
+}
+
+func (a *AppController) ReconcileAll(ctx context.Context) error {
+	apps, err := a.Store.ListApp(ctx)
+	if err != nil {
+		return err
+	}
+	for _, app := range apps {
+		if err := a.ReconcileApp(ctx, app); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TopologicalSort(services map[string]*types.ServiceSpec, deps map[string][]types.Dependency) ([]string, error) {
@@ -62,7 +81,7 @@ func TopologicalSort(services map[string]*types.ServiceSpec, deps map[string][]t
 	return order, nil
 }
 
-func (a *AppController) ReconcileApp(ctx context.Context,app *types.AppGroup) error {
+func (a *AppController) ReconcileApp(ctx context.Context, app *types.AppGroup) error {
 	// Resolve dependency order
 	order, err := TopologicalSort(app.Service, app.Dependencies)
 	if err != nil {
@@ -79,27 +98,36 @@ func (a *AppController) ReconcileApp(ctx context.Context,app *types.AppGroup) er
 
 		//  Call service-level reconciliation
 		if err := a.reconcileService(ctx, app, *spec); err != nil {
-			return fmt.Errorf("failed to reconcile service %s in app %s: %w",serviceName,app.Name,err,)
+			return fmt.Errorf("failed to reconcile service %s in app %s: %w", serviceName, app.Name, err)
 		}
 	}
 
 	return nil
 }
 
-//converting service to tasks
-func (a *AppController) reconcileService(ctx context.Context,app *types.AppGroup,spec types.ServiceSpec,) error {
-	existingTasks, err := a.Store.ListTasksByService(ctx, app.Name, spec.Name)
+// converting service to tasks
+func (a *AppController) reconcileService(ctx context.Context, app *types.AppGroup, spec types.ServiceSpec) error {
+	records, err := a.Store.ListTasks(ctx)
 	if err != nil {
 		return err
 	}
-	current := len(existingTasks)
+
+	current := 0
+	for _, rec := range records {
+		if rec.Task == nil {
+			continue
+		}
+		if rec.Task.AppName == app.Name && rec.Task.ServiceName == spec.Name {
+			current++
+		}
+	}
 	desired := spec.Replicas
 	// SCALE UP
 	if current < desired {
 		toCreate := desired - current
 		for i := 0; i < toCreate; i++ {
 			t := &task.Task{
-				Name :       spec.Name,
+				Name:        spec.Name,
 				Image:       spec.Image,
 				ID:          uuid.New(),
 				CPU:         spec.CPU,
@@ -137,7 +165,7 @@ func (a *AppController) reconcileService(ctx context.Context,app *types.AppGroup
 	return nil
 }
 
-func (a *AppController) CreateApp(ctx context.Context,app *types.AppGroup) error {
+func (a *AppController) CreateApp(ctx context.Context, app *types.AppGroup) error {
 	// Basic validation
 	if app.Name == "" {
 		return fmt.Errorf("app name cannot be empty")
@@ -171,21 +199,21 @@ func (a *AppController) CreateApp(ctx context.Context,app *types.AppGroup) error
 	return nil
 }
 
-func (a *AppController) AddDependency(ctx context.Context,appName, from, to string,weight int) error {
+func (a *AppController) AddDependency(ctx context.Context, appName, from, to string, weight int) error {
 	app, err := a.Store.GetApp(ctx, appName)
 	if err != nil {
 		return err
 	}
 	dep := types.Dependency{
-		TargetService: to,
+		TargetService:  to,
 		MaxNetworkCost: weight,
 	}
-	app.Dependencies[from] = append(app.Dependencies[from],dep,)
+	app.Dependencies[from] = append(app.Dependencies[from], dep)
 	app.Version++
 	return a.Store.SaveApp(ctx, app)
 }
 
-func (a *AppController) AddService(ctx context.Context,appName string,serviceName string,replicas int,) error {
+func (a *AppController) AddService(ctx context.Context, appName string, serviceName string, replicas int) error {
 	app, err := a.Store.GetApp(ctx, appName)
 	if err != nil {
 		return err
@@ -197,8 +225,8 @@ func (a *AppController) AddService(ctx context.Context,appName string,serviceNam
 	return a.Store.SaveApp(ctx, app)
 }
 
-//Removing a service
-func (a *AppController) RemoveService(ctx context.Context,appName string,serviceName string,) error {
+// Removing a service
+func (a *AppController) RemoveService(ctx context.Context, appName string, serviceName string) error {
 	return a.Store.DeleteService(ctx, appName, serviceName)
 }
 

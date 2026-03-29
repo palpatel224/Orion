@@ -68,3 +68,21 @@ func (c *Client) SubmitTask(taskJSON []byte) error {
 
 	return nil
 }
+
+// SubmitApp sends a JSON payload to the Manager to create an app.
+func (c *Client) SubmitApp(appJSON []byte) error {
+	url := fmt.Sprintf("%s/app", c.ManagerAddr)
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(appJSON))
+	if err != nil {
+		return fmt.Errorf("failed to submit app: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("manager rejected app (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
