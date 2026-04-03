@@ -17,6 +17,7 @@ import (
 	"orchestrator/task"
 	"orchestrator/types"
 	"orchestrator/worker"
+	"github.com/docker/go-connections/nat"
 )
 
 func startWorkers(host string) ([]store.Worker, []*worker.Worker) {
@@ -73,6 +74,7 @@ func startManagers(store store.Store) (*manager.Manager, []*manager.Manager) {
 	go mapi.Start()
 	go leader.UpdateTasks()
 	go leader.DoHealthChecks()
+	go leader.ProcessTasks()
 
 	followers := []*manager.Manager{}
 
@@ -97,7 +99,7 @@ func startManagers(store store.Store) (*manager.Manager, []*manager.Manager) {
 		go api.Start()
 		go m.UpdateTasks()
 		go m.DoHealthChecks()
-
+		go m.ProcessTasks()
 		followers = append(followers, m)
 	}
 
@@ -126,52 +128,57 @@ func registerWorkers(ctx context.Context, leaderAddr string, workerObjs []*worke
 func submitApp() {
 
 	app := types.AppGroup{
-		Name:    "App-1",
+		Name:    "DemoApp",
 		Version: 1,
 		Service: map[string]*types.ServiceSpec{
-
 			"frontend": {
-				Name:     "frontend",
-				Image:    "nginx:latest",
-				CPU:      1,
-				Memory:   128,
-				Disk:     2,
-				Replicas: 1,
+				Name:         "frontend",
+				Image:        "nginx:latest",
+				CPU:          1,
+				Memory:       128,
+				Disk:         2,
+				Replicas:     2,
+				ExposedPorts: nat.PortSet{"80/tcp":{},}, // frontend listens on HTTP/HTTPS
+				HealthCheck: "/",
+				HealthCheckType: types.HealthCheckHTTP,
 			},
-
 			"cache": {
-				Name:     "cache",
-				Image:    "redis:latest",
-				CPU:      1,
-				Memory:   128,
-				Disk:     2,
-				Replicas: 1,
+				Name:         "cache",
+				Image:        "redis:latest",
+				CPU:          1,
+				Memory:       128,
+				Disk:         2,
+				Replicas:     1,
+				ExposedPorts: nat.PortSet{"6379/tcp":{},}, // redis default port
+				HealthCheckType: types.HealthCheckTCP,
 			},
-
 			"worker": {
-				Name:     "worker",
-				Image:    "ubuntu:latest",
-				CPU:      1,
-				Memory:   128,
-				Disk:     2,
-				Replicas: 1,
+				Name:         "worker",
+				Image:        "python:3.11",
+				CPU:          1,
+				Memory:       128,
+				Disk:         2,
+				Replicas:     1,
+				ExposedPorts: nat.PortSet{"8000/tcp":{},},
+				Cmd:          []string{"python", "-m", "http.server", "9000"},
+				HealthCheck: "",
+				HealthCheckType: types.HealthCheckNone,
 			},
 		},
 		Dependencies: map[string][]types.Dependency{
-            "frontend": {
-               {
-                  TargetService: "cache",
-                  MaxNetworkCost: 1,
-               },
-            },
-            "cache": {
-                {
-                  TargetService: "worker",
-                  MaxNetworkCost: 1,
-            },
-        },
-    },
-
+			"frontend": {
+				{
+					TargetService: "cache",
+					MaxNetworkCost: 1,
+				},
+			},
+			"cache": {
+				{
+					TargetService: "worker",
+					MaxNetworkCost: 1,
+				},
+			},
+		},
 	}
 
 	data, _ := json.Marshal(app)

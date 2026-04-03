@@ -31,8 +31,4 @@ type Store interface {
 	ListApp(ctx context.Context)([]*types.AppGroup,error)
 	DeleteService(ctx context.Context, appName string, serviceName string) error
 	ListTasksByService(ctx context.Context,appName string,serviceName string)([]TaskRecord,error)
-	// //for links
-	// UpdateLink(ctx context.Context,srcID string,dstID string,metric LinkMetrics) error
-	// GetLink(ctx context.Context,srcID string,dstID string) (LinkMetrics,error)
-	// ListLinks(ctx context.Context) ([]LinkRecord,error)
 }

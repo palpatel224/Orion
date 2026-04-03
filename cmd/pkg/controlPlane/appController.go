@@ -98,6 +98,10 @@ func (a *AppController) reconcileService(ctx context.Context,app *types.AppGroup
 	if current < desired {
 		toCreate := desired - current
 		for i := 0; i < toCreate; i++ {
+			dependency := []string{}
+			for _,dep:=range app.Dependencies[spec.Name]{
+				dependency=append(dependency,dep.TargetService)
+			}
 			t := &task.Task{
 				Name :       spec.Name,
 				Image:       spec.Image,
@@ -108,7 +112,11 @@ func (a *AppController) reconcileService(ctx context.Context,app *types.AppGroup
 				State:       task.Pending,
 				AppName:     app.Name,
 				ServiceName: spec.Name,
-				// StartTime:   time.Now(),
+				Dependencies: dependency,
+				Cmd:         spec.Cmd,
+				ExposedPorts: spec.ExposedPorts,
+				HealthCheck: spec.HealthCheck,
+				HealthCheckType: spec.HealthCheckType,
 			}
 
 			if err := a.Store.CreateTask(ctx, t, ""); err != nil {

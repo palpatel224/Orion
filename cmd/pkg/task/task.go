@@ -8,12 +8,10 @@ import (
 	"log"
 	"os"
 	"time"
-
 	"github.com/docker/go-connections/nat"
 	"github.com/google/uuid"
-
 	"math"
-
+	myTypes "orchestrator/types"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -40,8 +38,8 @@ type Task struct {
 	CPU           int64
 	Memory        int64
 	Disk          int64
-	ExposedPorts  nat.PortSet
-	PortBindings  map[nat.Port][]nat.PortBinding
+	ExposedPorts  nat.PortSet   //Container listens on this port internally
+	PortBindings  map[nat.Port][]nat.PortBinding //container port ---> Host Machine Port
 	RestartPolicy string
 	StartTime     time.Time
 	FinishTime    time.Time
@@ -50,6 +48,11 @@ type Task struct {
 	AppName       string
 	ServiceName   string
 	Cmd           []string
+	Env           []string
+	WorkerIP      string
+	HostPort      int
+	Dependencies  []string
+	HealthCheckType myTypes.HealthCheckType
 }
 
 func (s State) MarshalJSON() ([]byte, error) {
@@ -107,6 +110,8 @@ type Config struct {
 	Disk          int64
 	Env           []string
 	RestartPolicy string
+	PortBindings  map[nat.Port][]nat.PortBinding
+
 }
 
 type DockerInspectResponse struct {
@@ -128,7 +133,7 @@ type Docker struct {
 
 func NewConfig(t *Task) Config {
 	c := Config{
-		Name:          t.Name,
+		Name:          t.ID.String(),
 		AttachStdin:   true,
 		AttachStderr:  true,
 		AttachStdout:  true,
@@ -137,8 +142,31 @@ func NewConfig(t *Task) Config {
 		Disk:          t.Disk,
 		Memory:        t.Memory,
 		RestartPolicy: t.RestartPolicy,
+		Env:           append([]string{}, t.Env...),
+		Cmd:		   append([]string{}, t.Cmd...),
+		PortBindings:  t.PortBindings,
 	}
 	return c
+}
+
+func (t Task) DeepCopy() Task {
+	newTask := t
+
+	// copy slices
+	newTask.Env = append([]string{}, t.Env...)
+
+	// copy maps
+	newTask.PortBindings = make(map[nat.Port][]nat.PortBinding)
+	for k, v := range t.PortBindings {
+		newTask.PortBindings[k] = append([]nat.PortBinding{}, v...)
+	}
+
+	newTask.ExposedPorts = make(map[nat.Port]struct{})
+	for k, v := range t.ExposedPorts {
+		newTask.ExposedPorts[k] = v
+	}
+
+	return newTask
 }
 
 func NewDocker(c *Config) Docker {
@@ -184,14 +212,16 @@ func (d *Docker) Run() DockerResult {
 	cc := container.Config{
 		Image:        d.Config.Image,
 		Tty:          false,
-		Env:          d.Config.Env,
 		ExposedPorts: d.Config.ExposedPorts,
+		Env:		  d.Config.Env,
+		Cmd:		  d.Config.Cmd,
 	}
 
 	hc := container.HostConfig{
 		RestartPolicy:   rp,
 		Resources:       r,
 		PublishAllPorts: true,
+		PortBindings:    d.Config.PortBindings,
 	}
 
 	res, er := d.Client.ContainerCreate(ctx, &cc, &hc, nil, nil, d.Config.Name)

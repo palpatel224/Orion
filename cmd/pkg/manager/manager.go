@@ -7,14 +7,18 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net"
 	"orchestrator/node"
 	"orchestrator/metrics"
 	"orchestrator/scheduler"
 	"orchestrator/controlPlane"
 	"orchestrator/store"
 	"orchestrator/task"
+	"orchestrator/types"
 	"os"
 	"strings"
+	"strconv"
+	"math/rand"
 	"sync"
 	"time"
 	workerpkg "orchestrator/worker"
@@ -57,11 +61,13 @@ type Manager struct {
 	etcdSession    *concurrency.Session
 	AdvertiseAddr  string
 	initialWorkers []store.Worker
+	pendingMu      sync.Mutex
 	Pending        queue.Queue
 	statsMu        sync.RWMutex
 	stats          map[string]CachedStats
 	AppController  *control.AppController
 	NetworkController *control.NetworkController
+	PortAllocator *PortAllocator
 }
 
 type Config struct {
@@ -74,6 +80,17 @@ type Config struct {
 	WorkerClient  WorkerCommunicator
 }
 
+//keeps a track of used ports on each node 
+type PortAllocator struct {
+	usedPorts map[string]map[int]bool // nodeID -> port -> used
+}
+
+func NewPortAllocator() *PortAllocator {
+	return &PortAllocator{
+		usedPorts: make(map[string]map[int]bool),
+	}
+}
+
 type Elector struct {
 	Session  *concurrency.Session
 	Election *concurrency.Election
@@ -84,6 +101,28 @@ type managerInfo struct {
 	ID        string    `json:"id"`
 	Address   string    `json:"address,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+//Allocates a free port on the given node and marks it as used. Returns an error if no free ports are available.
+func (p *PortAllocator) Allocate(nodeID string) (int, error) {
+	if _, ok := p.usedPorts[nodeID]; !ok {
+		p.usedPorts[nodeID] = make(map[int]bool)
+	}
+
+	for port := 30000; port < 40000; port++ {
+		if !p.usedPorts[nodeID][port] {
+			p.usedPorts[nodeID][port] = true
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free ports on node %s", nodeID)
+}
+
+// Releases a previously allocated port on the given node.
+func (p *PortAllocator) Release(nodeID string, port int) {
+	if _, ok := p.usedPorts[nodeID]; ok {
+		delete(p.usedPorts[nodeID], port)
+	}
 }
 
 func (m *Manager) GetOrUpdateStats(ctx context.Context, worker string) (workerpkg.Stats, error) {
@@ -261,6 +300,7 @@ func NewWithConfig(cfg Config) *Manager {
 		initialWorkers: initialWorkers,
 		electionStop:   make(chan struct{}),
 		stats:          make(map[string]CachedStats),
+		PortAllocator: NewPortAllocator(),
 	}
 
 	if etcdStore, ok := cfg.Store.(*store.Client); ok {
@@ -459,10 +499,76 @@ func (m *Manager) schedulePendingSnapshot() {
 		return
 	}
 	for _, rec := range record {
-		if rec.Task != nil && rec.Task.State == task.Pending {
+		if rec.Task == nil {
+			continue
+		}
+		switch rec.Task.State {
+		case task.Pending:
 			go m.tryToSchedulePendingTask(rec.Task.ID)
+		case task.Scheduled:
+			// Stuck in Scheduled — no worker ever confirmed Running
+			if time.Since(rec.Task.StartTime) > 60*time.Second {
+				m.resetTaskToPending(*rec.Task)
+				go m.tryToSchedulePendingTask(rec.Task.ID)
+			}
 		}
 	}
+}
+
+// Returns the endpoints of all tasks of a service of an Application that are already scheduled and running.
+func (m *Manager) getServiceEndpoints(ctx context.Context, appName, serviceName string) ([]string, error) {
+	records, err := m.Store.ListTasksByService(ctx, appName, serviceName)
+	if err != nil {
+		return nil, err
+	}
+	var endpoints []string
+	for _, r := range records {
+		// filter only RUNNING tasks
+		if r.Task.State != task.Running {
+			continue
+		}
+		// ensure runtime info exists
+		if r.Task.WorkerIP == "" || r.Task.HostPort == 0 {
+			continue
+		}
+		addr := fmt.Sprintf("%s:%d", r.Task.WorkerIP, r.Task.HostPort)
+		endpoints = append(endpoints, addr)
+	}
+	return endpoints, nil
+}
+
+func (m *Manager) resolveDependencies(ctx context.Context, t *task.Task) ([]string, error) {
+	envs := []string{}
+	for _, depService := range t.Dependencies {
+		endpoints, err := m.getServiceEndpoints(ctx, t.AppName, depService)
+		if err != nil {
+			return nil, err
+		}
+		if len(endpoints) == 0 {
+			return nil, fmt.Errorf("dependency %s not ready", depService)
+		}
+		//randomly selecting an endpoint for the depedency and setting it as an env variable for the task to use for discovery
+		addr := endpoints[rand.Intn(len(endpoints))]
+		envKey := strings.ToUpper(depService) + "_SERVICE"
+		envs = append(envs, fmt.Sprintf("%s=%s", envKey, addr))
+	}
+	return envs, nil
+}
+
+func (m *Manager) StorePendingQueue(t task.Task) {
+    // Always enqueue a clean task — strip any partial scheduling state
+    t.WorkerIP = ""
+    t.HostPort = 0
+    t.PortBindings = nil
+    t.State = task.Pending
+	m.pendingMu.Lock()
+    m.Pending.Enqueue(task.TaskEvent{
+        ID:        uuid.New(),
+        State:     task.Pending,
+        Timestamp: time.Now(),
+        Task:      t,
+    })
+	m.pendingMu.Unlock()
 }
 
 func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID) {
@@ -489,34 +595,75 @@ func (m *Manager) tryToSchedulePendingTask(taskID uuid.UUID) {
 	workerCancel()
 	if err != nil {
 		log.Printf("Manager %s : no worker is selected for task %s : %v\n", m.ID, resp.ID, err)
+		m.StorePendingQueue(*resp)
 		return
 	}
+	
+	//select a port on that worker for the task and update the task with that port information
+	port,err:=m.PortAllocator.Allocate(worker.ID)
+	if err != nil {
+		log.Printf("No ports available on worker %s", worker.ID)
+		m.StorePendingQueue(*resp)
+		return
+	}
+	//update the workerID  and the port
+	resp.WorkerIP=worker.Address
+	resp.HostPort=port
+
 	latency := time.Since(start).Seconds()
 	metrics.NodeSelectionLatency.Observe(latency)
+
+	//set the port binding for the task
+	resp.PortBindings = make(map[nat.Port][]nat.PortBinding)
+
+	for portKey := range resp.ExposedPorts {
+		resp.PortBindings[portKey] = []nat.PortBinding{
+			{
+				HostIP:   worker.Address,
+				HostPort: strconv.Itoa(resp.HostPort),
+			},
+		}
+	}
+	//Now update the env for dependency discovery
+	envctx,envCancel:=context.WithTimeout(context.Background(), 5*time.Second)
+	envs,err:=m.resolveDependencies(envctx,resp)
+	envCancel()
+	if err!=nil{
+		log.Printf("Failed to resolve dependencies for task %s: %v",resp.ID,err)
+		m.PortAllocator.Release(worker.ID, port)
+		m.StorePendingQueue(*resp)
+		return
+	}
+	resp.Env = append(resp.Env, envs...)
+	resp.State = task.Scheduled
 	//Now update it in the etcd
 	assignctx, assignCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	succeeded, e := m.etcdStore.AssignPendingTasks(assignctx, resp, worker.ID)
 	assignCancel()
 	if e != nil {
 		log.Printf("Manager %s: failed to assign task %s to worker %s: %v", m.ID, resp.ID, worker.ID, err)
+		m.PortAllocator.Release(worker.ID, port)
+		m.StorePendingQueue(*resp)
 		return
 	}
 	if !succeeded {
 		log.Printf("Manager %s: task %s was already scheduled by another manager", m.ID, resp.ID)
+		m.PortAllocator.Release(worker.ID, port)
+		m.StorePendingQueue(*resp)
 		return
 	}
-	resp.State = task.Scheduled
+	
 	m.dispatchTaskToWorker(*resp, worker)
 	latency = time.Since(resp.StartTime).Seconds()
     metrics.SchedulerLatency.Observe(latency)
 	//measures the time taken by the scheduler
 }
 
+// send task to the worker
 func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
 	if worker == nil {
 		return
 	}
-	// send task to the worker
 	//if there is some error in sending task to worker or in scheduling
 	//then it has to be rescheduled and in the etcd changes are to be chamgeed back
 
@@ -529,13 +676,16 @@ func (m *Manager) dispatchTaskToWorker(t task.Task, worker *store.Worker) {
 	ck, errResp, err := m.WorkerClient.StartTask(worker.Address, te)
 	if err != nil {
 		log.Printf("Manager %s: dispatch to worker %s for task %s failed: %v", m.ID, worker.ID, t.ID, err)
+		m.PortAllocator.Release(worker.ID, t.HostPort)
 		m.resetTaskToPending(t)
+		m.StorePendingQueue(t)  
 		return
 	}
 
 	if errResp != nil {
 		log.Printf("Manager %s: worker %s rejected task %s: %s", m.ID, worker.ID, t.ID, errResp.Message)
-		m.resetTaskToPending(t)
+		m.PortAllocator.Release(worker.ID, t.HostPort)
+        m.resetTaskToPending(t)
 		return
 	}
 	fmt.Printf("task is %+v\n",ck)
@@ -555,6 +705,10 @@ func (m *Manager) resetTaskToPending(t task.Task) {
 		return
 	}
 	t.State = task.Pending
+	t.HostPort=0
+	t.WorkerIP=""
+	t.RestartCount=0
+	t.PortBindings = nil
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := m.Store.UpdateTaskState(ctx, &t, "")
 	defer cancel()
@@ -836,18 +990,20 @@ func (m *Manager) SendWork() {
 		log.Printf("Manager is not leader \n")
 		return
 	}
+	m.pendingMu.Lock()
 	if m.Pending.Len() == 0 {
 		log.Printf("No work in queue \n")
 		return
 	}
 	e := m.Pending.Dequeue()
+	m.pendingMu.Unlock()
 	te, ok := e.(task.TaskEvent)
 	if !ok {
 		log.Printf("Unexpected item in queue: %T", e)
 		return
 	}
-	//task event pulled successfully from the pending queue
 
+	//task event pulled successfully from the pending queue
 	log.Printf("Task Event %v is pulled successfully from queue \n", te.ID)
 	if m.Store == nil {
 		log.Println("Store not configured; cannot process task")
@@ -858,7 +1014,9 @@ func (m *Manager) SendWork() {
 	cancel()
 	if existingErr != nil && !errors.Is(existingErr, store.ErrNotFound) {
 		log.Printf("Error retrieving task %s from store: %v", te.Task.ID, existingErr)
+		m.pendingMu.Lock()
 		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
 		return
 	}
 
@@ -872,28 +1030,78 @@ func (m *Manager) SendWork() {
 			existingTask.ID.String(), existingTask.State)
 		return
 	}
-	//if existing worker is nil
 
-	t := te.Task
+	//if existing worker is nil
+	t := te.Task.DeepCopy()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	w, e := m.SelectWorker(ctx, t)
 	cancel()
 	if e != nil {
 		log.Printf("Error selecting worker for task %v : %v\n", t.ID, e)
+		m.pendingMu.Lock()
 		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
 		return
 	}
+	//select a port on that worker for the task and update the task with that port information
+	port,err:=m.PortAllocator.Allocate(w.ID)
+	if err != nil {
+		log.Printf("No ports available on worker %s",w.ID)
+		m.pendingMu.Lock()
+		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
+		return
+	}
+	//update the workerID  and the port
+	t.WorkerIP=w.Address
+	t.HostPort=port
+
 	metrics.TasksScheduled.Inc()
+
+	t.PortBindings = make(map[nat.Port][]nat.PortBinding)
+	for portKey := range t.ExposedPorts {
+		t.PortBindings[portKey] = []nat.PortBinding{
+			{
+				HostIP:   w.Address,
+				HostPort: strconv.Itoa(t.HostPort),
+			},
+		}
+	}
+
+	//Now update the env for dependency discovery
+	envctx,envCancel:=context.WithTimeout(context.Background(), 5*time.Second)
+	envs,err:=m.resolveDependencies(envctx,&t)
+	envCancel()
+	if err!=nil{
+		log.Printf("Failed to resolve dependencies for task %s: %v",t.ID,err)
+		m.PortAllocator.Release(w.ID, port)
+		m.pendingMu.Lock()
+		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
+		return
+	}
+	t.Env = append(t.Env, envs...)
+	t.State = task.Scheduled
+	
 	//interact with the worker client to start the task on the selected worker
-	newTask, errResp, err := m.WorkerClient.StartTask(w.Address, te)
+	newTe:=te
+	newTe.Task = t
+	newTask, errResp, err := m.WorkerClient.StartTask(w.Address, newTe)
 	if err != nil {
 		log.Printf("Error connecting to %v: %v\n", w.ID, err)
+		m.PortAllocator.Release(w.ID, port)
+		m.pendingMu.Lock()
 		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
 		return
 	}
 
 	if errResp != nil {
 		log.Printf("Response error (%d): %s", errResp.HTTPStatusCode, errResp.Message)
+		m.PortAllocator.Release(w.ID, port)
+		m.pendingMu.Lock()
+		m.Pending.Enqueue(te)
+		m.pendingMu.Unlock()
 		return
 	}
 
@@ -1072,33 +1280,41 @@ func (m *Manager) checkTaskHealth(t task.Task) error {
 		return errors.New(msg)
 	}
 
-	worker := strings.Split(workerID, ":")
-	url := fmt.Sprintf("http://%s:%s%s", worker[0], *hostPort, t.HealthCheck)
+    host := t.WorkerIP
+    if h, _, err := net.SplitHostPort(t.WorkerIP); err == nil {
+        host = h
+    }
 
-	log.Printf("Calling health check for task %s: %s\n", t.ID, url)
+    switch t.HealthCheckType {
+    case types.HealthCheckHTTP:
+        url := fmt.Sprintf("http://%s:%d%s", host, t.HostPort, t.HealthCheck)
+        resp, err := http.Get(url)
+        if err != nil {
+            return fmt.Errorf("http health check failed: %v", err)
+        }
+        defer resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            return fmt.Errorf("http health check returned %d", resp.StatusCode)
+        }
 
-	resp, err := http.Get(url)
+    case types.HealthCheckTCP:
+        addr := fmt.Sprintf("%s:%d", host, t.HostPort)
+        conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+        if err != nil {
+            return fmt.Errorf("tcp health check failed: %v", err)
+        }
+        conn.Close()
 
-	if err != nil {
-		msg := fmt.Sprintf("Error connecting to health check %s", url)
-		log.Println(msg)
-		return errors.New(msg)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("Error health check for task %s did not return 200\n", t.ID)
-		log.Println(msg)
-		return errors.New(msg)
-	}
-
-	log.Printf("Task %s health check response: %v\n", t.ID, resp.StatusCode)
-
+    default:
+        return nil  // no health check configured
+    }
+	log.Printf("Health check passed for task %s\n", t.ID)
 	return nil
-
 }
 
 func (m *Manager) doHealthChecks() {
 	for _, t := range m.GetTasks() {
+		//retrieving task from etcd and chekcing if it is in running state
 		if t.State == task.Running && t.RestartCount < 3 {
 			if t.HealthCheck != "" {
 				err := m.checkTaskHealth(*t)
@@ -1110,6 +1326,10 @@ func (m *Manager) doHealthChecks() {
 			}
 		} else if t.State == task.Failed && t.RestartCount < 3 {
 			m.RestartTask(t)
+		} else if t.State==task.Failed && t.RestartCount >= 3{
+			t.RestartCount = 0
+            m.resetTaskToPending(*t)
+            m.StorePendingQueue(*t)
 		}
 	}
 }
@@ -1138,6 +1358,8 @@ func (m *Manager) RestartTask(t *task.Task) {
 
 	if workerID == "" {
 		log.Printf("No worker assignment found for task %s; cannot restart", t.ID)
+		m.resetTaskToPending(*t)
+		m.StorePendingQueue(*t)
 		return
 	}
 
@@ -1161,6 +1383,7 @@ func (m *Manager) RestartTask(t *task.Task) {
 	if assignedWorker == nil {
 		log.Printf("Assigned worker %s for task %s not found among active workers", workerID, t.ID)
 		m.resetTaskToPending(*t)
+		m.StorePendingQueue(*t)
 		return
 	}
 
@@ -1216,14 +1439,16 @@ func (m *Manager) StopTask(worker string, taskID string) {
 			log.Printf("Error fetching task %s to persist stop: %v", taskID, err)
 			return
 		}
-
+		
 		t.State = task.Completed
 		t.FinishTime = time.Now().UTC()
-
+		
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 		if err := m.Store.UpdateTaskState(ctx, t, worker); err != nil {
 			log.Printf("Error persisting stop for task %s: %v", taskID, err)
 		}
+		// if updating in the etcd store is successful then only release the port 
+		m.PortAllocator.Release(worker, t.HostPort)
 		cancel()
 	}
 

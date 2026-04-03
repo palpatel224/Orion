@@ -83,52 +83,6 @@ func (c *Client) workerKey(id string) string {
 	return fmt.Sprintf("/workers/%s", id)
 }
 
-// func (c *Client) UpdateLink(ctx context.Context,srcID string,dstID string,metric LinkMetrics,) error {
-// 	key := fmt.Sprintf("/network/links/%s/%s", srcID, dstID)
-// 	data, err := json.Marshal(metric)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	_, err = s.Cli.Put(ctx, key, string(data))
-// 	return err
-// }
-
-// func (c *Client) GetLink(ctx context.Context,srcID string,dstID string,) (LinkMetrics, error) {
-// 	key := fmt.Sprintf("/network/links/%s/%s", srcID, dstID)
-// 	resp, err := c.Cli.Get(ctx, key)
-// 	if err != nil {
-// 		return LinkMetrics{}, err
-// 	}
-// 	if len(resp.Kvs) == 0 {
-// 		return LinkMetrics{}, ErrNotFound
-// 	}
-// 	var metric LinkMetrics
-// 	err = json.Unmarshal(resp.Kvs[0].Value, &metric)
-// 	return metric, err
-// }
-
-// func (c *Client) ListLinks(ctx context.Context) ([]LinkRecord, error) {
-// 	resp, err := s.Cli.Get(ctx, "/network/links/", clientv3.WithPrefix())
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	var records []LinkRecord
-// 	for _, kv := range resp.Kvs {
-// 		parts := strings.Split(string(kv.Key), "/")
-// 		src := parts[3]
-// 		dst := parts[4]
-// 		var metric LinkMetrics
-// 		json.Unmarshal(kv.Value, &metric)
-
-// 		records = append(records, LinkRecord{
-// 			SrcID:  src,
-// 			DstID:  dst,
-// 			Metric: metric,
-// 		})
-// 	}
-// 	return records, nil
-// }
-
 func(c *Client) GetApp(ctx context.Context,name string)(*types.AppGroup,error){
 	key:=c.servicePrefix(name)
 	resp,err:=c.Cli.Get(ctx,key)
